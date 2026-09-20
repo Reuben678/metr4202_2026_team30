@@ -1,4 +1,5 @@
 # Request: empty trigger call
 ---
-int8 w_info
-int8 w_cost
+# Response: utility weight values
+float32 w_info
+float32 w_cost

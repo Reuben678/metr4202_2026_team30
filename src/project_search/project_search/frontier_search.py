@@ -79,15 +79,14 @@ class FrontierSearch(Node):
             'get_util_weights'
             )
         
-        for _ in range(10):
+        for attempt in range(10):
             if self.weight_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info('UtilWeights service found')
                 break
-                self.get_logger().info('UtilWeights service not avail')
-            else:
-                self.get_logger().error('UtilWeights never available')
+            if (attempt == 9):
+                self.get_logger().error('UtilWeights not available')
                 raise RuntimeError('UtilWeights service never became available')
-        # Service is available
-        self.get_logger().info('UtilWeights service avail')
+
         # Send an initial weights request
         self.send_request()
 
