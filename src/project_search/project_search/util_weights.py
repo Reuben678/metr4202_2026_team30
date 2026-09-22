@@ -50,7 +50,7 @@ class WeightCalc (Node):
         response.w_info = self.w_info
         response.w_cost = self.w_cost
 
-        self.get_logger().info(f"Weights provided were {w_info} & {w_cost}")
+        self.get_logger().info(f"Weights provided were {self.w_info} & {self.w_cost}")
 
         return response
     
@@ -61,15 +61,15 @@ class WeightCalc (Node):
             return
 
         # Process latest msg
-        msg = self.latest
+        msg = self.latest_map
         width = msg.info.width
         height = msg.info.height
         resolution = msg.info.resolution
 
         # Occupancy grid array in 2D
         grid = np.array(msg.data, dtype=np.int8).reshape((height, width))
-        free, unknown, occupied = count_cells(grid)
-        calc_util_weights(free, unknown, occupied)
+        free, unknown, occupied = self.count_cells(grid)
+        self.calc_util_weights(free, unknown, occupied)
 
     def count_cells(self, grid):
         free_mask = grid == FREE
@@ -84,10 +84,16 @@ class WeightCalc (Node):
 
     # Calculate the weights of information gain and cost
     def calc_util_weights(self, free, unknown, occupied):
-        w_info = unknown / (free + occupied)
-        w_cost = 1 - w_info
-        self.w_info
-        self.w_cost
+        
+        total_cells = free + unknown + occupied
+
+        if total_cells == 0:
+            self.w_info = 1.0
+            self.w_cost = 0.0
+            return
+
+        self.w_info = unknown / total_cells
+        self.w_cost = 1.0 - self.w_info
 
 def main():
     rclpy.init()
@@ -103,7 +109,9 @@ def main():
     finally:
         # Stop node spinning (destroy and shutdown)
         weight_calc.destroy_node()
-        rclpy.shutdown()
+
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -40,6 +40,7 @@ class FrontierSearch(Node):
         self.latest_odom = None
         self.w_info = 1.0
         self.w_cost = 1.0
+        self.weight_future = None
 
         # Create subscriptions
         # ___________________________________________________________ 
@@ -76,7 +77,7 @@ class FrontierSearch(Node):
 
         self.weight_client = self.create_client(
             UtilWeights,
-            'get_util_weights'
+            'util_weights_service'
             )
         
         for attempt in range(10):
@@ -90,37 +91,47 @@ class FrontierSearch(Node):
         # Send an initial weights request
         self.send_request()
 
+        # Initially had FrontierData here, but not defined. Changed to GetFrontiers
+        #MST client is also looking for get_frontiers
         self.frontier_srv = self.create_service(
-            FrontierData,
-            'frontier_data_service',
+            GetFrontiers,
+            'get_frontiers',
             self.frontier_resp_callback
         )
        
        # Initialisation complete
         self.get_logger().info('FrontierSearch node initialised')
 
-        # Start BehaviorTreeLog with simple goal request to current pose
-        goal = PoseStamped()
-        goal.header.frame_id = 'map'
-        goal.header.stamp = self.get_clock().now().to_msg()
-        goal.pose.position.x, goal.pose.position.y = self.get_robot_pose()
-        goal.pose.position.z = 0.0
-        goal.pose.orientation.w = 1.0      
+        # nav goals handled in exploration manager
+        # # Start BehaviorTreeLog with simple goal request to current pose
+        # goal = PoseStamped()
+        # goal.header.frame_id = 'map'
+        # goal.header.stamp = self.get_clock().now().to_msg()
+        # goal.pose.position.x, goal.pose.position.y = self.get_robot_pose()
+        # goal.pose.position.z = 0.0
+        # goal.pose.orientation.w = 1.0      
 
-        # LET THE NAVIGATION BEGIN!!
-        self.goal_pub.publish(goal)  
+        # # LET THE NAVIGATION BEGIN!!
+        # self.goal_pub.publish(goal)  
 
     # Callback functions
     # _______________________________________________________________
-
+    
     def frontier_resp_callback(self, request, response):
         if self.latest_map is None:
-            response.succes = False
+            response.success = False
             return response
         # Update our map information
         info = self.latest_map.info
 
-        clusters = cluster_frontiers(process_grid())
+        #class methods need self, fixed the clusters naming error below 
+        frontier_mask = self.process_grid()
+        if frontier_mask is None:
+            response.success = False
+            return response 
+        
+        clusters = self.cluster_frontiers(frontier_mask)
+
         # Check if clusters were found
         if not clusters:
             self.get_logger().info("No frontiers were found within the grid")
@@ -134,25 +145,65 @@ class FrontierSearch(Node):
         response.success = True
         return response        
 
-    def weights_request(self, timeout = 5.0):
+    """ Has troubles with this function because the client and future names were different,
+        and didn't check whether self.weight_client was ready. It was changed to an async request, below."""
+    # def weights_request(self, timeout = 5.0):
         
-        if not self.weight_client(timout_sec=timeout):
-            return None
-        # Send a call to the UtilWeights server
-        future = self.weights_client.call_async(UtilWeights.Request())
-        # Spin this call until we get a response (or timeout)
-        rclpy.spin_until_future_complete(self.future, timeout_sec = timeout)
-        response = future.result()
-        # Check if we got a response
-        if response is not None:
-            # Process the weights from this response
-            self.w_cost = response.w_cost
-            self.w_info = response.w_info
-            return
-        # Response was empty
-        self.get_logger().warn("UtilWeights returned no response")
-        return None
+    #     if not self.weight_client(timout_sec=timeout):
+    #         return None
+    #     # Send a call to the UtilWeights server
+    #     future = self.weights_client.call_async(UtilWeights.Request())
+    #     # Spin this call until we get a response (or timeout)
+    #     rclpy.spin_until_future_complete(self.future, timeout_sec = timeout)
+    #     response = future.result()
+    #     # Check if we got a response
+    #     if response is not None:
+    #         # Process the weights from this response
+    #         self.w_cost = response.w_cost
+    #         self.w_info = response.w_info
+    #         return
+    #     # Response was empty
+    #     self.get_logger().warn("UtilWeights returned no response")
+    #     return None
 
+    def send_request(self) -> None:
+        """Request the latest utility weights asynchronously."""
+
+        if not self.weight_client.service_is_ready():
+            self.get_logger().warning("UtilWeights service is not ready.")
+            return
+
+        if (hasattr(self, "weight_future") and self.weight_future is not None and not self.weight_future.done()):
+            # A request is already in progress.
+            return
+
+        request = UtilWeights.Request()
+
+        self.weight_future = (self.weight_client.call_async(request))
+
+        self.weight_future.add_done_callback(self.weights_response_callback)
+
+    def weights_response_callback(self, future) -> None:
+        """Store utility weights returned by the service."""
+
+        try:
+            response = future.result()
+
+        except Exception as error:
+            self.get_logger().error(f"UtilWeights request failed: {error}")
+            self.weight_future = None
+            return
+
+        if response is None:
+            self.get_logger().warning("UtilWeights returned no response.")
+            self.weight_future = None
+            return
+
+        self.w_cost = response.w_cost
+        self.w_info = response.w_info
+
+        self.get_logger().info(f"Updated utility weights: " f"w_info={self.w_info:.3f}, "f"w_cost={self.w_cost:.3f}")
+        self.weight_future = None
 
     # Callback to read from BehaviorTreeLog topic
     def bt_log_callback(self, msg:BehaviorTreeLog):
@@ -176,6 +227,7 @@ class FrontierSearch(Node):
     """
     Find cells which form a frontier (FREE cells bordering UNKNOWN cells)
     """
+    @staticmethod
     def find_frontier_mask(grid):
         free_mask = grid == FREE
         unknown_mask = grid == UNKNOWN
@@ -197,6 +249,7 @@ class FrontierSearch(Node):
     """
     Cluster cells of frontiers
     """
+    @staticmethod
     def cluster_frontiers(frontier_mask):
         structure = np.ones((3,3), dtype=int) # 8-connectivity
         clusters = []
@@ -204,13 +257,17 @@ class FrontierSearch(Node):
 
         for label_id in range(1, num + 1):
             ys, xs = np.where(labeled == label_id)
+
             size = len(xs)
             centroid_px = (float(np.mean(xs)), float(np.mean(ys)))
-            # Check frontier against criterion
-            if (size < MIN_FRONTIER_SIZE or centroid_px < MIN_FRONTIER_DIST):
+
+            centroid_dist = np.hypot(centroid_px[0], centroid_px[1])
+
+            if (size < MIN_FRONTIER_SIZE or centroid_dist < MIN_FRONTIER_DIST):
                 continue
 
-            clusters.append({"label": label_id, "size":size, "centroid_px":centroid_px})
+            clusters.append({"label": label_id, "size": size, "centroid_px": centroid_px})
+
         return clusters
 
     """
@@ -304,7 +361,7 @@ class FrontierSearch(Node):
         grid = np.array(msg.data, dtype=np.int8).reshape((height, width))
 
         # 4) Determine mask grid for frontiers
-        frontier_mask = find_frontier_mask(grid)
+        frontier_mask = self.find_frontier_mask(grid)
         return frontier_mask
 
 def main():
