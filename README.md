@@ -22,13 +22,12 @@ sudo apt install python3-networkx python3-numpy python3-scipy \
 
 ### Download and build
 
-Clone this repository into a ROS 2 workspace. Replace `<REPOSITORY_URL>` with
-the HTTPS URL shown under **Code** on this GitHub page:
+Clone this repository into a ROS 2 workspace. 
 
 ```bash
 mkdir -p ~/metr4202_demo_ws/src
 cd ~/metr4202_demo_ws/src
-git clone <REPOSITORY_URL>
+git clone https://github.com/Reuben678/metr4202_2026_team30.git
 
 cd ~/metr4202_demo_ws
 source /opt/ros/humble/setup.bash
