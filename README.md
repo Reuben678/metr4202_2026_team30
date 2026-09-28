@@ -12,7 +12,7 @@ The demo requires the course's ROS 2 Humble, TurtleBot3 simulation, Gazebo,
 SLAM Toolbox, Nav2 and RViz2 setup.
 
 The project also uses NetworkX, NumPy and SciPy. Install these additional
-Python packages and Nav2 Simple Commander if they are not already available:
+Python packages and Nav2 Simple Commander if they are not already installed:
 
 ```bash
 sudo apt update
@@ -42,5 +42,5 @@ ros2 launch project_explore autonomous_exploration.launch.py
 ```
 
 The launch file starts the TurtleBot3 Gazebo world, SLAM, Nav2, RViz2, the
-frontier search and utility nodes, and the Exploration Manager. Allow time
-for Gazebo and Nav2 to start. Press `Ctrl+C` in the terminal to stop the demo.
+frontier search and utility nodes, and the Exploration Manager. Gazebo and Rviz2 take some time 
+to start up.
