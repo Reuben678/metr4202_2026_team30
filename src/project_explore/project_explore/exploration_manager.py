@@ -196,7 +196,9 @@ class ExplorationManager(Node):
         if self.current_goal is None:
             return
 
-        goal_position = (self.current_goal.x, self.current_goal.y)
+        pose = get_robot_position()
+
+        goal_position = (self.current_goal.x, self.current_goal.y, pose)
 
         if self.last_navigation_result == NavigationResult.SUCCEEDED:
             self.visited_positions.append(goal_position)

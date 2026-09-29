@@ -5,6 +5,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rclpy.parameter import Parameter
 
+import math
 
 class NavigationResult(Enum):
     """Results returned to the Exploration Manager."""
@@ -38,7 +39,7 @@ class Nav2Handler:
 
         self.navigator.get_logger().info("NavigateToPose action server is available.")
 
-    def navigate_to(self, x: float, y: float, result_callback: Callable[[NavigationResult], None]) -> bool:
+    def navigate_to(self, x: float, y: float, pose, result_callback: Callable[[NavigationResult], None]) -> bool:
         """Send a map position to Nav2 as the next navigation goal."""
 
         if self.navigation_active:
@@ -52,11 +53,14 @@ class Nav2Handler:
         goal.pose.position.y = y
         goal.pose.position.z = 0.0
 
-        # No particular final heading is required, so use a neutral orientation.
+        # Determine an approx orientation we will end in
+        orientation = math.atan2((pose.y - y), (pose.x - x))
+
+        # End in an orientation in that aligns with direction
         goal.pose.orientation.x = 0.0
         goal.pose.orientation.y = 0.0
         goal.pose.orientation.z = 0.0
-        goal.pose.orientation.w = 1.0
+        goal.pose.orientation.w = orientation
 
         self.result_callback = result_callback
         self.navigation_active = True
