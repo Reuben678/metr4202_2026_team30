@@ -1,4 +1,5 @@
 # Request: empty trigger call
+bool complete
 ---
 # Response: utility weight values
 float32 w_info

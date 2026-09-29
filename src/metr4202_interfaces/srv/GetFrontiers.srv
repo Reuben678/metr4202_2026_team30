@@ -2,3 +2,4 @@
 ---
 FrontierArray frontiers
 bool success
+bool complete

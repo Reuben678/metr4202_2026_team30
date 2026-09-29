@@ -109,6 +109,11 @@ class ExplorationManager(Node):
 
         try:
             response = self.frontier_future.result()
+            # Check frontier search response for completion
+            if self.mst_planner.completion_check(response):
+                # Frontier message marked search as complete
+                self.state = ExplorationState.COMPLETE
+                return False            
             frontiers = self.mst_planner.parse_frontier_response(response)
             _, ordered_frontiers = self.mst_planner.generate_latest_plan(frontiers, robot_position)
         except (ValueError, RuntimeError) as error:
@@ -247,6 +252,7 @@ class ExplorationManager(Node):
                 self.publish_mission_status()
                 self.mission_complete = True
                 self.timer.cancel()
+                rclpy.shutdown()
 
 
 def main(args=None) -> None:

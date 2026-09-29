@@ -82,6 +82,13 @@ class MSTPlanner:
 
         return frontiers
 
+    def completion_check(self, response):
+        # Check response frontier response for completion flag
+        if response.complete:
+            # Frontier response marked complete
+            return True
+        return False
+
     def parse_frontier_response(self, response) -> List[Frontier]:
         """Check the service response and extract its Frontier objects."""
 

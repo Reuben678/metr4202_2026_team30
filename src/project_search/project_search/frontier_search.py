@@ -22,7 +22,7 @@ from scipy import ndimage
 
 FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 
-MIN_FRONTIER_SIZE = 5   # Min size of frontier allowable 
+MIN_FRONTIER_SIZE = 3   # Min size of frontier allowable 
 MIN_FRONTIER_DIST = 3
 
 MAP_FRAME = "map"
@@ -41,6 +41,11 @@ class FrontierSearch(Node):
         self.w_info = 1.0
         self.w_cost = 1.0
         self.weight_future = None
+        self.service_complete = False
+
+        # Create timer
+        # ___________________________________________________________
+        self.timer = self.create_timer(5.0, self.timer_tick)
 
         # Create subscriptions
         # ___________________________________________________________ 
@@ -117,6 +122,12 @@ class FrontierSearch(Node):
     # Callback functions
     # _______________________________________________________________
     
+    def timer_tick(self):
+        if self.service_complete:
+            self.get_logger().info("FrontierSearch Complete")
+            self.timer.cancel()
+            rclpy.shutdown()
+
     def frontier_resp_callback(self, request, response):
         if self.latest_map is None:
             response.success = False
@@ -135,7 +146,13 @@ class FrontierSearch(Node):
         # Check if clusters were found
         if not clusters:
             self.get_logger().info("No frontiers were found within the grid")
-            return
+            response.success = True
+            response.complete = True
+            self.service_complete = True        # Mark this node of destruction
+            self.send_request()     # Notify UtilWeights Node of shutdown
+            return response
+        
+        # Output frontier cluster count as info
         self.get_logger().info(f"{len(clusters)} frontiers(s) found")
 
         response.frontiers = self.package_frontiers(clusters, 
@@ -143,28 +160,8 @@ class FrontierSearch(Node):
                                 info.origin.position
                             )
         response.success = True
+        response.complete = False
         return response        
-
-    """ Has troubles with this function because the client and future names were different,
-        and didn't check whether self.weight_client was ready. It was changed to an async request, below."""
-    # def weights_request(self, timeout = 5.0):
-        
-    #     if not self.weight_client(timout_sec=timeout):
-    #         return None
-    #     # Send a call to the UtilWeights server
-    #     future = self.weights_client.call_async(UtilWeights.Request())
-    #     # Spin this call until we get a response (or timeout)
-    #     rclpy.spin_until_future_complete(self.future, timeout_sec = timeout)
-    #     response = future.result()
-    #     # Check if we got a response
-    #     if response is not None:
-    #         # Process the weights from this response
-    #         self.w_cost = response.w_cost
-    #         self.w_info = response.w_info
-    #         return
-    #     # Response was empty
-    #     self.get_logger().warn("UtilWeights returned no response")
-    #     return None
 
     def send_request(self) -> None:
         """Request the latest utility weights asynchronously."""
@@ -178,6 +175,7 @@ class FrontierSearch(Node):
             return
 
         request = UtilWeights.Request()
+        request.complete = self.service_complete
 
         self.weight_future = (self.weight_client.call_async(request))
 
@@ -378,7 +376,9 @@ def main():
     finally:
         # Stop node spinning (destroy and shutdown)
         frontier_search.destroy_node()
-        rclpy.shutdown()
+        
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()

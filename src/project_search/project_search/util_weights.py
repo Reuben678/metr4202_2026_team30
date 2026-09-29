@@ -30,6 +30,7 @@ class WeightCalc (Node):
         self.latest_map = None
         self.w_info = 1.0
         self.w_cost = 1.0
+        self.complete = False
 
         self.grid_sub = self.create_subscription(
             OccupancyGrid,
@@ -47,6 +48,11 @@ class WeightCalc (Node):
 
     def calc_weights_resp_callback(self, request, response):
         
+        if request.complete:
+            # Destroy node as search is complete
+            self.get_logger().info("UtilWeights was shutdown")
+            rclpy.shutdown()
+
         response.w_info = self.w_info
         response.w_cost = self.w_cost
 

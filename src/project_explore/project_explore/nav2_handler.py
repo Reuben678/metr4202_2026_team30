@@ -33,7 +33,7 @@ class Nav2Handler:
 
         self.navigator.get_logger().info("Waiting for NavigateToPose action server...")
 
-        while not self.navigator.nav_to_pose_client.wait_for_server(timeout_sec=1.0):
+        while not self.navigator.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
             self.navigator.get_logger().info("NavigateToPose action server not available, waiting...")
 
         self.navigator.get_logger().info("NavigateToPose action server is available.")

@@ -64,13 +64,48 @@ def generate_launch_description():
         "nav2_default_view.rviz",
     )
 
-    gazebo = IncludeLaunchDescription(
+    gazebo_ros_launch_directory = os.path.join(
+    get_package_share_directory("gazebo_ros"), "launch")
+
+    world = LaunchConfiguration("world")
+    x_pose = LaunchConfiguration("x_pose")
+    y_pose = LaunchConfiguration("y_pose")
+
+    default_world = os.path.join(
+        get_package_share_directory("turtlebot3_gazebo"),
+        "worlds",
+        "turtlebot3_world.world",
+    )
+
+    declare_world = DeclareLaunchArgument(
+        "world",
+        default_value=default_world,
+        description="Full path to the Gazebo world file.",
+    )
+    declare_x_pose = DeclareLaunchArgument("x_pose", default_value="-2.0")
+    declare_y_pose = DeclareLaunchArgument("y_pose", default_value="-0.5")
+
+    gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(
-                gazebo_launch_directory,
-                "turtlebot3_world.launch.py",
-            )
-        )
+            os.path.join(gazebo_ros_launch_directory, "gzserver.launch.py")),
+        launch_arguments={"world": world}.items(),
+    )
+
+    gzclient = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_ros_launch_directory, "gzclient.launch.py")),
+    )
+
+    robot_state_publisher = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_launch_directory, "robot_state_publisher.launch.py")),
+        launch_arguments={"use_sim_time": use_sim_time}.items(),
+    )
+
+    spawn_turtlebot = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gazebo_launch_directory, "spawn_turtlebot3.launch.py")),
+        launch_arguments={"x_pose": x_pose, "y_pose": y_pose}.items(),
     )
 
 
@@ -168,8 +203,14 @@ def generate_launch_description():
         [
             declare_use_sim_time,
             declare_turtlebot3_model,
+            declare_world,
+            declare_x_pose,
+            declare_y_pose,
             set_turtlebot3_model,
-            gazebo,
+            gzserver,
+            gzclient,
+            robot_state_publisher,
+            spawn_turtlebot,
             navigation_and_slam,
             rviz,
             util_weights,
