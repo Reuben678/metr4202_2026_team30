@@ -107,18 +107,6 @@ class FrontierSearch(Node):
        # Initialisation complete
         self.get_logger().info('FrontierSearch node initialised')
 
-        # nav goals handled in exploration manager
-        # # Start BehaviorTreeLog with simple goal request to current pose
-        # goal = PoseStamped()
-        # goal.header.frame_id = 'map'
-        # goal.header.stamp = self.get_clock().now().to_msg()
-        # goal.pose.position.x, goal.pose.position.y = self.get_robot_pose()
-        # goal.pose.position.z = 0.0
-        # goal.pose.orientation.w = 1.0      
-
-        # # LET THE NAVIGATION BEGIN!!
-        # self.goal_pub.publish(goal)  
-
     # Callback functions
     # _______________________________________________________________
     
