@@ -16,7 +16,7 @@ from rclpy.duration import Duration
 from tf2_ros import Buffer, TransformListener
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
-from project_localisation.marker_geometry import transform, fuse, update_record, estimate
+from project_localisation.marker_geometry import transform, fuse, update_record, estimate, square_points
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo
 from rclpy.time import Time
@@ -77,6 +77,7 @@ class Localizer(Node):
         self.markers = self.create_publisher(MarkerArray,'/targets/markers', LATCH)
         self.info = None
         self.size = parameter(self, 'marker_size', 0.10)
+        square_points(self.size)
         self.min_side = parameter(self, 'min_side_px', 25.0)
         self.max_range = parameter(self, 'max_range', 3.0)
         self.error_limit = parameter(self, 'max_reprojection', 2.0)
@@ -128,6 +129,7 @@ class Localizer(Node):
        self.records.clear()
        self.queue.clear()
        self.epoch += 1
+       self.last_tf = None
 
     def reset_service(self, request, response):
        self.reset()
@@ -141,7 +143,9 @@ class Localizer(Node):
            trans, q = parts(latest)
            yaw = math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1-2*(q[1]**2+q[2]**2))
            current = np.array([trans[0], trans[1], yaw])
-           if self.last_tf is not None:
+           if self.last_tf is None:
+               self.last_tf = current
+           else:
                delta = current - self.last_tf
                turn = abs(math.atan2(math.sin(delta[2]), math.cos(delta[2])))
                if np.linalg.norm(delta[:2]) > 0.25 or turn > 0.17:
@@ -176,6 +180,9 @@ class Localizer(Node):
                         or not 0 <= error <= 2.0):
                     continue
                 xyz = transform(point, trans, q)
+                camera = np.asarray(trans, dtype=float)
+                if not np.isfinite(xyz).all() or not np.isfinite(camera).all():
+                    continue
                 track = self.tracks.setdefault(mid, deque(maxlen=20))
                 if track and t - track[-1][0] < 0.19:
                     continue
@@ -221,11 +228,41 @@ class Localizer(Node):
                                                targets=records)
         send(self.status, state)
         self.markers.publish(array)
-        save(self.output/'target.json', state)
+        save(self.output/'targets.json', state)
         self.log_file.flush()
 
 def localizer_main():
     run(Localizer)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
