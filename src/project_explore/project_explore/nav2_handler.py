@@ -3,10 +3,25 @@ from typing import Callable, Optional
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
+from nav2_msgs.action import DriveOnHeading, Spin
+from action_msgs.msg import GoalStatus
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rclpy.parameter import Parameter
+from rclpy.action import ActionClient
 
 import math
+
+# Recovery Macros
+MIN_RADIUS = 30
+MAX_RADIUS = 50
+RADIAL_STEP = 5
+PHI_STEP = 15
+RECOVERY_ATTEMPS = 3
+RECOVERY_PERIOD = 5
+
+# Drive Parameters
+DRIVE_SPEED = 0.05
+DRIVE_TIMEOUT = 15
 
 class NavigationResult(Enum):
     """Results returned to the Exploration Manager."""
@@ -25,8 +40,19 @@ class Nav2Handler:
         self.latest_costmap = None
         self.current_goal = None
         
-        # Create subscriptions 
 
+        # Create action client
+        self.spin_client = ActionClient(self, Spin, 'spin')
+        self.spin_done = False
+        self.spin_success = False
+
+        self.drive_client = ActionClient(self, DriveOnHeading, 'drive_on_heading')
+        self.drive_done = False
+        self.drive_success = False
+
+        self.spin_client = ActionClient(self.
+
+        # Create subscriptions 
         self.sub_odom = self.create_subscription(
             Odometry,
             '/odom',
@@ -40,6 +66,10 @@ class Nav2Handler:
             self.costmap_callback,
             10
         )
+
+        # Create timer
+        self.recovery_timer = self.create_timer(RECOVERY_PERIOD,
+                                self.failure_recovery)
 
         # BasicNavigator creates its own ROS node, so it must also use Gazebo time.
         self.navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
@@ -63,6 +93,17 @@ class Nav2Handler:
             return
         self.latest_costmap = msg
 
+    # Class methods __________________________________________________________
+
+    """
+    Get the robot bearing from the latest odometry data
+    """
+    def get_robot_orientation(self):
+        if self.latest_odom is None:
+            self.get_logger().warn("No odometry data recieved")
+            return None
+        w = self.latest_odom.pose.pose.orientation.w
+        return w
 
     """
     Get the current odometry data, provided by the callback function
@@ -108,9 +149,9 @@ class Nav2Handler:
         goal.pose.position.y = y
         goal.pose.position.z = 0.0
 
-        pose = get_robot_pose()
+        px, py = get_robot_pose()
         # Determine an approx orientation we will end in
-        orientation = math.atan2((pose.y - y), (pose.x - x))
+        orientation = math.atan2((py - y), (px - x))
 
         # End in an orientation in that aligns with direction
         goal.pose.orientation.x = 0.0
@@ -136,11 +177,14 @@ class Nav2Handler:
 
         # Check the timeout while navigation is active so a stuck goal is cancelled.
         if self.navigation_start_time is not None:
-            elapsed = (self.navigator.get_clock().now() - self.navigation_start_time).nanoseconds / 1e9
+            elapsed = (self.navigator.get_clock().now() - 
+                        self.navigation_start_time).nanoseconds / 1e9
 
             if elapsed > self.navigation_timeout:
                 self.navigator.get_logger().warning("Navigation timed out.")
                 self.navigator.cancelTask()
+                # Call Navigation recovery
+                success = failure_recovery()
                 self.finish_navigation(NavigationResult.FAILED)
                 return
 
@@ -164,6 +208,7 @@ class Nav2Handler:
             result = NavigationResult.FAILED
             self.navigator.get_logger().warning("Navigation failed.")
 
+            pass
         self.finish_navigation(result)
 
     def finish_navigation(self, result: NavigationResult) -> None:
@@ -179,6 +224,171 @@ class Nav2Handler:
 
         if callback is not None:
             callback(result)
+
+    """
+    Failure recovery backup for navigation
+    """
+    def failure_recovery(self) -> bool:
+        self.get_logger().warn("Failure recovery called!")
+        success = False
+
+        for attempt in range(RECOVERY_ATTEMPTS):
+            # Get current data
+            px, py = get_robot_pose()
+            pw = get_robot_orientation()
+            costmap = get_local_costmap()
+            
+            if (pose or costmap) is None:
+                self.get_logger().error("Recovery failed due to missing data")
+                return
+            
+            # Process data 
+            info = costmap.info
+            grid = np.array(costmap.data, dtype=np.int8)
+            grid = grid.reshape((info.height, info.width))
+
+            gx, gy = recovery_pose(px, py, grid, info) # Lowest local cost (X,Y)
+
+            goal = grid_to_world(gx, gy, info)
+            
+            success = manual_operation(px, py, pw, goal)
+    
+            if success:
+                return success
+        
+        return success
+
+
+    """
+    Manually command action to spin towards desired bearing
+    """
+    def manual_spin(self, px, py, pw, goal) -> bool:
+        
+        dx = abs(px) - abs(goal[0])
+        dy = abs(py) - abs(goal[1])
+        
+        phi_goal = atan2(dx, dy)
+        delta_yaw = math.atan2(np.sin(phi_goal - pw), np.cos(phi_goal - pw))
+
+        if not self.spin_client.server_is_ready():
+            self.get_logger().warn("spin server not ready")
+            return False
+        goal = Spin.goal()
+        goal.target_yaw = float(delta_yaw)
+        goal.time_allowance = 10
+
+        self.spin_done = False
+        self.spin_success = False
+        future = self.spin_client.send_goal_async(goal)
+        future.add_done_callback(self.spin_response)
+        return True
+
+    def spin_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn("Spin was rejected")
+            self.spin_done = True
+            return
+        self.spin_success = handle.get_result_async()
+        return
+
+    """
+    Manually command action to drive required distance to goal
+    """
+    def manual_drive(px, py, goal) -> bool:
+    
+        self.drive_ready =self.drive_client.wait_for_server(timout_sec=10.0)
+        
+        if not self.drive_ready:
+            self.get_logger().warn("Drive_on_heading server not ready")
+            return False
+
+        dx = abs(px) - abs(goal[0])
+        dy = abs(py) - abs(goal[1])
+        dist = np.hypot(dx, dy)
+        # Prepare goal
+        goal = DriveOnHeading.Goal()
+        goal.target.x = float(dist)
+        goal.speed = DRIVE_SPEED
+        goal.time_allowance = DRIVE_TIMEOUT
+
+        self.drive_done = False
+        self.drive_success = False
+
+        self.drive_client.send_goal_async(goal, 
+
+    def drive_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn("Drive was rejected")
+            self.drive_done = True
+            return
+        self.drive_success = handle.get_result_async()
+        return
+
+    """
+    Convert global coordinates to map grid frame
+    """
+    def world_to_grid(wx, wy, info) -> tuple[int, int]:
+        gx = math.floor((wx - info.origin.x.position.x) / info.resolution)
+        gy = math.floor((wy - info.origin.y.position.y) / info.resolution)
+
+        if (0 <= gx <= info.width) and (0 <= gy <= info.height):
+            return gx, gy
+        return None
+
+    """
+    Convert grid coordinates to world frame
+    """
+    def grid_to_world(gx, gy, info) -> tuple[int, int]
+        wx = info.origin.position.x + (gx + 0.5) * info.resolution
+        wy = info.origin.position.y + (gy + 0.5) * info.resolution
+        return wx, wy
+
+    """
+    Determine the optimal recovery path from radial search
+    """
+    def recovery_pose(px, py, grid, info):
+        gx, gy = world_to_grid(px, py, info)
+
+        # Search bearings from 0 to 2Pi
+        bearings = np.linspace(0, 2 * np.pi, (360 / PHI_STEP) , endpoint=false)
+        ideal_phi = 0
+        # Search across bearings
+        for phi in bearings:
+            count += 1
+            xs = gx + MIN_RADIUS * np.cos(phi)
+            ys = gy + MIN_RADIUS * np.sin(phi)
+        
+            cost = get_cost(xs, ys, grid)
+            cost = 100 - cost
+
+            ideal_phi = (ideal_phi + (phi * cost)) / 2
+
+        # March radius on ideal bearing
+        ideal_radius = MIN_RADIUS
+        for radius in range(MIN_RADIUS, MAX_RADIUS, RADIAL_STEP):
+            xs = gx + radius * np.cos(ideal_phi)
+            ys = gy + radius * np.sin(ideal_phi)
+
+            cost = get_cost(xs, ys, grid)
+            cost = 100 - cost;
+            ideal_radius = (ideal_radius + (radius * cost)) / 2
+
+        xs = gx + ideal_radius * np.cos(ideal_phi)
+        ys = gy + ideal_radius * np.sin(ideal_phi)
+
+        return (xs, ys)
+    
+    """
+    Return corrected cost of point (x,y) within the costmap coordinate frame
+    """
+    def get_cost(self, px, py, grid) -> int:
+        cost = int(grid[py, px])
+        # Correct cost for UNKNOWN OR INSCRIBED
+        if (cost < 0 or cost >98):
+            cost = 100
+        return cost
 
     def cancel_goal(self) -> None:
         """Cancel the current navigation goal."""
