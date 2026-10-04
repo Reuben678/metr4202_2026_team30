@@ -2,6 +2,7 @@ from enum import Enum, auto
 from typing import Callable, Optional
 
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rclpy.parameter import Parameter
 
@@ -20,6 +21,25 @@ class Nav2Handler:
 
     def __init__(self) -> None:
         self.navigator = BasicNavigator()
+        self.latest_odom = None
+        self.latest_costmap = None
+        self.current_goal = None
+        
+        # Create subscriptions 
+
+        self.sub_odom = self.create_subscription(
+            Odometry,
+            '/odom',
+            self.odom_callback,
+            10
+        )
+
+        self.sub_costmap = self.create_subscription(
+            local_costmap,
+            '/local_costmap/costmap',
+            self.costmap_callback,
+            10
+        )
 
         # BasicNavigator creates its own ROS node, so it must also use Gazebo time.
         self.navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
@@ -28,6 +48,41 @@ class Nav2Handler:
         self.navigation_timeout = 45.0
         self.navigation_active = False
         self.result_callback: Optional[Callable[[NavigationResult], None]] = None
+
+    # Odometry callback functions _____________________________________________
+    def odom_callback(self, msg: Odometry):
+        if msg is None:
+            self.get_logger().warn("NavHandler received no new Odom data") 
+            return
+        self.latest_odom = msg
+
+
+    def costmap_callback(self, msg: Costmap):
+        if msg is None:
+            self.get_logger().warn("NavHandler received no new costmap data")
+            return
+        self.latest_costmap = msg
+
+
+    """
+    Get the current odometry data, provided by the callback function
+    """
+    def get_robot_pose(self):
+        if self.latest_odom is None:
+            self.get_logger().warn("No odometry data received")
+            return None
+
+        p = self.latest_odom.pose.pose.position
+        return p.x, p.y
+
+    """
+    Get the current costmap data, provided by the callback function
+    """
+    def get_local_costmap(self):
+        if self.latest_costmap is None:
+            self.get_logger().warn("No new costmap data was received")
+            return None
+        return costmap
 
     def wait_until_active(self) -> None:
         """Wait until Nav2 is ready to receive a goal."""
@@ -39,7 +94,7 @@ class Nav2Handler:
 
         self.navigator.get_logger().info("NavigateToPose action server is available.")
 
-    def navigate_to(self, x: float, y: float, pose, result_callback: Callable[[NavigationResult], None]) -> bool:
+    def navigate_to(self, x: float, y: float, result_callback: Callable[[NavigationResult], None]) -> bool:
         """Send a map position to Nav2 as the next navigation goal."""
 
         if self.navigation_active:
@@ -53,6 +108,7 @@ class Nav2Handler:
         goal.pose.position.y = y
         goal.pose.position.z = 0.0
 
+        pose = get_robot_pose()
         # Determine an approx orientation we will end in
         orientation = math.atan2((pose.y - y), (pose.x - x))
 
@@ -69,6 +125,7 @@ class Nav2Handler:
         self.navigation_start_time = self.navigator.get_clock().now()
         self.navigator.goToPose(goal)
         self.navigator.get_logger().info(f"Navigation goal sent: ({x:.2f}, {y:.2f})")
+        self.current_goal = (x, y)
         return True
 
     def update(self) -> None:
@@ -117,6 +174,8 @@ class Nav2Handler:
 
         callback = self.result_callback
         self.result_callback = None
+
+        self.current_goal = None
 
         if callback is not None:
             callback(result)
