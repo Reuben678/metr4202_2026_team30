@@ -14,7 +14,7 @@ setup(
          ['resource/' + package_name]),
         ('share/' + package_name,
          ['package.xml', 'LICENCE',
-            package_name + '/localisation.launch.py'])
+    ])
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,11 +29,8 @@ setup(
     },
     entry_points={
         'console_scripts':[
-            'detector = project_localisation.target_localisation:detector:main',
             'localizer = project_localisation.target_localisation:localizer:main',
-            'evaluate = project_localisation.validation_tools:evaluate_main',
-            'marker_maker = project_localisation.validation_tools:marker_maker_main',
-            'lab_world = project_localisation.validation_tools:lab_world_main',
+            'evaluate = project_localisation.evaluate:evaluate_main'
         ]
     }
 
