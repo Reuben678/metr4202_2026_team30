@@ -143,7 +143,7 @@ class Localizer(Node):
            trans, q = parts(latest)
            yaw = math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1-2*(q[1]**2+q[2]**2))
            current = np.array([trans[0], trans[1], yaw])
-           if self.last_tf is not None:
+           if self.last_tf is None:
                self.last_tf = current
            else:
                delta = current - self.last_tf
@@ -228,7 +228,7 @@ class Localizer(Node):
                                                targets=records)
         send(self.status, state)
         self.markers.publish(array)
-        save(self.output/'target.json', state)
+        save(self.output/'targets.json', state)
         self.log_file.flush()
 
 def localizer_main():
