@@ -8,13 +8,14 @@ from action_msgs.msg import GoalStatus
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rclpy.parameter import Parameter
 from rclpy.action import ActionClient
+from builtin_interfaces.msg import Duration
 
 import math
 
 # Recovery Macros
-MIN_RADIUS = 30
-MAX_RADIUS = 50
-RADIAL_STEP = 5
+MIN_RADIUS = 8
+MAX_RADIUS = 12
+RADIAL_STEP = 1
 PHI_STEP = 15
 RECOVERY_ATTEMPS = 3
 RECOVERY_PERIOD = 5
@@ -22,6 +23,7 @@ RECOVERY_PERIOD = 5
 # Drive Parameters
 DRIVE_SPEED = 0.05
 DRIVE_TIMEOUT = 15
+SPIN_TIMEOUT = 10
 
 class NavigationResult(Enum):
     """Results returned to the Exploration Manager."""
@@ -29,7 +31,6 @@ class NavigationResult(Enum):
     SUCCEEDED = auto()
     FAILED = auto()
     CANCELLED = auto()
-
 
 class Nav2Handler:
     """Send navigation goals and report their results using Nav2."""
@@ -40,17 +41,14 @@ class Nav2Handler:
         self.latest_costmap = None
         self.current_goal = None
         
-
         # Create action client
-        self.spin_client = ActionClient(self, Spin, 'spin')
+        self.spin_client = ActionClient(self.recovery_helper, Spin, 'spin')
         self.spin_done = False
         self.spin_success = False
 
-        self.drive_client = ActionClient(self, DriveOnHeading, 'drive_on_heading')
+        self.drive_client = ActionClient(self.recovery_helper, DriveOnHeading, 'drive_on_heading')
         self.drive_done = False
         self.drive_success = False
-
-        self.spin_client = ActionClient(self.
 
         # Create subscriptions 
         self.sub_odom = self.create_subscription(
@@ -66,10 +64,6 @@ class Nav2Handler:
             self.costmap_callback,
             10
         )
-
-        # Create timer
-        self.recovery_timer = self.create_timer(RECOVERY_PERIOD,
-                                self.failure_recovery)
 
         # BasicNavigator creates its own ROS node, so it must also use Gazebo time.
         self.navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
@@ -251,13 +245,18 @@ class Nav2Handler:
 
             goal = grid_to_world(gx, gy, info)
             
-            success = manual_operation(px, py, pw, goal)
-    
-            if success:
-                return success
-        
-        return success
-
+            spin_success = manual_spin(px, py, pw, goal)
+            if not spin_success:
+                continue
+            
+            drive_sucess = manual_drive(px, py, pw, goal)
+            if not drive_success:
+                continue
+            
+            if drive_success and spin_success:
+                return True
+        self.get_logger().warn(f"Recovery failed after {RECOVERY_ATTEMPTS}")
+        return False
 
     """
     Manually command action to spin towards desired bearing
@@ -273,25 +272,16 @@ class Nav2Handler:
         if not self.spin_client.server_is_ready():
             self.get_logger().warn("spin server not ready")
             return False
-        goal = Spin.goal()
+        goal = Spin.Goal()
         goal.target_yaw = float(delta_yaw)
-        goal.time_allowance = 10
+        goal.time_allowance = Duration(sec=10)
 
         self.spin_done = False
         self.spin_success = False
-        future = self.spin_client.send_goal_async(goal)
-        future.add_done_callback(self.spin_response)
-        return True
-
-    def spin_response(self, future):
-        handle = future.result()
-        if not handle.accepted:
-            self.get_logger().warn("Spin was rejected")
-            self.spin_done = True
-            return
-        self.spin_success = handle.get_result_async()
-        return
-
+        response = self.spin_client.send_goal(goal)
+        return (response is not None and 
+                response.status == GoalStatus.STATUS_SUCCEEDED)
+    
     """
     Manually command action to drive required distance to goal
     """
@@ -310,12 +300,12 @@ class Nav2Handler:
         goal = DriveOnHeading.Goal()
         goal.target.x = float(dist)
         goal.speed = DRIVE_SPEED
-        goal.time_allowance = DRIVE_TIMEOUT
+        goal.time_allowance = Duration(sec=DRIVE_TIMOUT)
 
-        self.drive_done = False
-        self.drive_success = False
+        response = self.drive_client.send_goal(goal)
 
-        self.drive_client.send_goal_async(goal, 
+        return (response is not None and
+                response.status == GoalStatus.STATUS_SUCCEEDED)
 
     def drive_response(self, future):
         handle = future.result()
@@ -340,7 +330,7 @@ class Nav2Handler:
     """
     Convert grid coordinates to world frame
     """
-    def grid_to_world(gx, gy, info) -> tuple[int, int]
+    def grid_to_world(gx, gy, info) -> tuple[int, int]:
         wx = info.origin.position.x + (gx + 0.5) * info.resolution
         wy = info.origin.position.y + (gy + 0.5) * info.resolution
         return wx, wy
