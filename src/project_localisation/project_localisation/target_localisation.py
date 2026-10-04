@@ -2,15 +2,12 @@
 
     #  Publish camera observations and timestamped map-frame target records
 import json
-
-import cv2
 import rclpy
 import math
 import csv
 import numpy as np
 
 from pathlib import Path
-from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import String
 from collections import deque
@@ -80,6 +77,7 @@ class Localizer(Node):
         self.markers = self.create_publisher(MarkerArray,'/targets/markers', LATCH)
         self.info = None
         self.size = parameter(self, 'marker_size', 0.10)
+        square_points(self.size)
         self.min_side = parameter(self, 'min_side_px', 25.0)
         self.max_range = parameter(self, 'max_range', 3.0)
         self.error_limit = parameter(self, 'max_reprojection', 2.0)
@@ -131,6 +129,7 @@ class Localizer(Node):
        self.records.clear()
        self.queue.clear()
        self.epoch += 1
+       self.last_tf = None
 
     def reset_service(self, request, response):
        self.reset()
@@ -145,6 +144,8 @@ class Localizer(Node):
            yaw = math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1-2*(q[1]**2+q[2]**2))
            current = np.array([trans[0], trans[1], yaw])
            if self.last_tf is not None:
+               self.last_tf = current
+           else:
                delta = current - self.last_tf
                turn = abs(math.atan2(math.sin(delta[2]), math.cos(delta[2])))
                if np.linalg.norm(delta[:2]) > 0.25 or turn > 0.17:
@@ -179,6 +180,9 @@ class Localizer(Node):
                         or not 0 <= error <= 2.0):
                     continue
                 xyz = transform(point, trans, q)
+                camera = np.asarray(trans, dtype=float)
+                if not np.isfinite(xyz).all() or not np.isfinite(camera).all():
+                    continue
                 track = self.tracks.setdefault(mid, deque(maxlen=20))
                 if track and t - track[-1][0] < 0.19:
                     continue
@@ -232,86 +236,8 @@ def localizer_main():
 
 
 
-class Detector(Node):
-    def __init__(self):
-        super().__init__('marker_detector')
-        self.size = parameter(self, 'marker_size', 0.10)
-        square_points(self.size)
-        name = parameter(self, 'dictionary', 'DICT_6X6_250')
-        self.dictionary = cv2.aruco.getPredefinedDictionary(
-            getattr(cv2.aruco, name))
-        if hasattr(cv2.aruco, 'DetectorParameters_create'):
-            self.settings = cv2.aruco.DetectorParameters_create()
-        else:
-            self.settings = cv2.aruco.DetectorParameters()
-        self.settings.cornerRefinementMethod = (
-            cv2.aruco.CORNER_REFINE_SUBPIX)
-        self.bridge = CvBridge()
-        self.info = None
-        self.last = -1.0
-        self.error_limit = parameter(self, 'max_reprojection', 2.0)
-        self.max_range = parameter(self, 'max_range', 3.0)
-        self.min_side = parameter(self, 'min_side_px', 25.0)
-        self.pub = self.create_publisher(String, '/targets/raw', 10)
-        image_topic = parameter(self, 'image_topic', '/camera/image_raw')
-        info_topic = parameter(self, 'info_topic', '/camera/camera_info')
-        self.create_subscription(CameraInfo, info_topic,
-                                 self.on_info, qos_profile_sensor_data)
-        self.create_subscription(Image, image_topic,
-                                 self.on_image, qos_profile_sensor_data)
-
-    def on_info(self, msg):
-        self.info = msg
-
-    def on_image(self, msg):
-        stamp_ns = (msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec)
-        t = stamp_ns * 1e-9
-        if t < self.last:
-            self.last = -1.0
-        if t - self.last < 0.2 or self.info is None:
-            return
-        self.last = t
-        info = self.info
-        if (info.width != msg.width or info.height != msg.height
-                or info.header.frame_id != msg.header.frame_id
-                or info.k[0] <= 0
-                or info.distortion_model not in
-                ('', 'plumb_bob', 'rational_polynomial')):
-            self.get_logger().error('CameraInfo mismatch/calibration error')
-            return
-        try:
-            grey = self.bridge.imgmsg_to_cv2(msg, 'mono8')
-            K = np.array(info.k).reshape(3, 3)
-            D = np.array(info.d, dtype=float)
-            if hasattr(cv2.aruco, 'ArucoDetector'):
-                detector = cv2.aruco.ArucoDetector(self.dictionary, self.settings)
-                corners, ids, _ = detector.detectMarkers(grey)
-            else:
-                corners, ids, _ = cv2.aruco.detectMarkers(
-                    grey, self.dictionary, parameters=self.settings)
-            items = []
-            if ids is not None:
-                    for corner, mid in zip(corners, ids.flatten()):
-                       pose = self.estimate(corner, K, D, msg.width,
-                                         msg.height)
-                       if pose is not None:
-                           items.append(dict(id=int(mid), **pose))
-
-            send(self.pub, dict(stamp_ns=stamp_ns, frame=msg.header.frame_id, items=items))
-        except (cv2.error, ValueError) as exc:
-            self.get_logger().error(str(exc))
 
 
-
-
-
-
-    def estimate(self, corners, K, D, width, height):
-        return estimate(corners, self.size, K, D, width, height,
-                    self.min_side, self.max_range, self.error_limit)
-
-def detector_main():
-    run(Detector)
 
 
 
