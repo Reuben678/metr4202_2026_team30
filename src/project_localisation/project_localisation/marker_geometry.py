@@ -24,8 +24,8 @@ def transform(point, translation, quaternion):
     return rotation(quaternion) @ point + translation
 
 def grid_world(y, x, resolution, origin, yaw):
-    a = (x*0.5)*resolution
-    b = (y*0.5)*resolution
+    a = (x+0.5)*resolution
+    b = (y+0.5)*resolution
     c = math.cos(yaw)
     s = math.sin(yaw)
     return origin[0] + c*a - b*s, origin[1] + s*a + b*c
