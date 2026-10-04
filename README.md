@@ -11,7 +11,7 @@ which to visit them, and sends navigation goals to Nav2.
 The demo requires the course's ROS 2 Humble, TurtleBot3 simulation, Gazebo,
 SLAM Toolbox, Nav2 and RViz2 setup.
 
-The project also uses NetworkX, NumPy and SciPy. Install these additional
+The project also uses NetworkX, NumPy, SciPy, OpenCV and cv_bridge. Install these additional
 Python packages and Nav2 Simple Commander if they are not already installed:
 
 ```bash
