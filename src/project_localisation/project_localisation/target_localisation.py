@@ -2,12 +2,15 @@
 
     #  Publish camera observations and timestamped map-frame target records
 import json
+
+import cv2
 import rclpy
 import math
 import csv
 import numpy as np
 
 from pathlib import Path
+from cv_bridge import CvBridge
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import String
 from collections import deque
@@ -16,7 +19,7 @@ from rclpy.duration import Duration
 from tf2_ros import Buffer, TransformListener
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
-from project_localisation.marker_geometry import transform, fuse, update_record, estimate
+from project_localisation.marker_geometry import transform, fuse, update_record, estimate, square_points
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo
 from rclpy.time import Time
@@ -226,6 +229,114 @@ class Localizer(Node):
 
 def localizer_main():
     run(Localizer)
+
+
+
+class Detector(Node):
+    def __init__(self):
+        super().__init__('marker_detector')
+        self.size = parameter(self, 'marker_size', 0.10)
+        square_points(self.size)
+        name = parameter(self, 'dictionary', 'DICT_6X6_250')
+        self.dictionary = cv2.aruco.getPredefinedDictionary(
+            getattr(cv2.aruco, name))
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
+            self.settings = cv2.aruco.DetectorParameters_create()
+        else:
+            self.settings = cv2.aruco.DetectorParameters()
+        self.settings.cornerRefinementMethod = (
+            cv2.aruco.CORNER_REFINE_SUBPIX)
+        self.bridge = CvBridge()
+        self.info = None
+        self.last = -1.0
+        self.error_limit = parameter(self, 'max_reprojection', 2.0)
+        self.max_range = parameter(self, 'max_range', 3.0)
+        self.min_side = parameter(self, 'min_side_px', 25.0)
+        self.pub = self.create_publisher(String, '/targets/raw', 10)
+        image_topic = parameter(self, 'image_topic', '/camera/image_raw')
+        info_topic = parameter(self, 'info_topic', '/camera/camera_info')
+        self.create_subscription(CameraInfo, info_topic,
+                                 self.on_info, qos_profile_sensor_data)
+        self.create_subscription(Image, image_topic,
+                                 self.on_image, qos_profile_sensor_data)
+
+    def on_info(self, msg):
+        self.info = msg
+
+    def on_image(self, msg):
+        stamp_ns = (msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec)
+        t = stamp_ns * 1e-9
+        if t < self.last:
+            self.last = -1.0
+        if t - self.last < 0.2 or self.info is None:
+            return
+        self.last = t
+        info = self.info
+        if (info.width != msg.width or info.height != msg.height
+                or info.header.frame_id != msg.header.frame_id
+                or info.k[0] <= 0
+                or info.distortion_model not in
+                ('', 'plumb_bob', 'rational_polynomial')):
+            self.get_logger().error('CameraInfo mismatch/calibration error')
+            return
+        try:
+            grey = self.bridge.imgmsg_to_cv2(msg, 'mono8')
+            K = np.array(info.k).reshape(3, 3)
+            D = np.array(info.d, dtype=float)
+            if hasattr(cv2.aruco, 'ArucoDetector'):
+                detector = cv2.aruco.ArucoDetector(self.dictionary, self.settings)
+                corners, ids, _ = detector.detectMarkers(grey)
+            else:
+                corners, ids, _ = cv2.aruco.detectMarkers(
+                    grey, self.dictionary, parameters=self.settings)
+            items = []
+            if ids is not None:
+                    for corner, mid in zip(corners, ids.flatten()):
+                       pose = self.estimate(corner, K, D, msg.width,
+                                         msg.height)
+                       if pose is not None:
+                           items.append(dict(id=int(mid), **pose))
+
+            send(self.pub, dict(stamp_ns=stamp_ns, frame=msg.header.frame_id, items=items))
+        except (cv2.error, ValueError) as exc:
+            self.get_logger().error(str(exc))
+
+
+
+
+
+
+    def estimate(self, corners, K, D, width, height):
+        return estimate(corners, self.size, K, D, width, height,
+                    self.min_side, self.max_range, self.error_limit)
+
+def detector_main():
+    run(Detector)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
