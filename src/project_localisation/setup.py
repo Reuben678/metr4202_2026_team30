@@ -29,7 +29,7 @@ setup(
     },
     entry_points={
         'console_scripts':[
-            'localizer = project_localisation.target_localisation:localizer:main',
+            'localizer = project_localisation.target_localisation:localizer_main',
             'evaluate = project_localisation.evaluate:evaluate_main'
         ]
     }
