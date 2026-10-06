@@ -7,10 +7,7 @@
   <maintainer email="mitchellcraw64@gmail.com">mjc</maintainer>
   <license>Apache-2.0</license>
 
-
-  <depend>rclpy</depend>
-  <depend>metr4202_interfaces</depend>
-    
+  <depend>metr4202_interfaces</depend>    
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>

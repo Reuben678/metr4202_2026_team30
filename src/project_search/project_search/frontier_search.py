@@ -16,6 +16,7 @@ from metr4202_interfaces.msg import FrontierArray
 from metr4202_interfaces.srv import UtilWeights
 from metr4202_interfaces.srv import GetFrontiers
 
+import math
 import numpy as np
 from scipy import ndimage
 
@@ -24,6 +25,7 @@ FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 
 MIN_FRONTIER_SIZE = 3   # Min size of frontier allowable 
 MIN_FRONTIER_DIST = 3
+MAX_FRONTIER_DIST = 20  # 
 
 MAP_FRAME = "map"
 ROBOT_FRAME = "base_link"
@@ -241,13 +243,16 @@ class FrontierSearch(Node):
         clusters = []
         labeled, num = ndimage.label(frontier_mask, structure=structure)
 
+        rx, ry = self.get_robot_pose()
+        
         for label_id in range(1, num + 1):
             ys, xs = np.where(labeled == label_id)
 
             size = len(xs)
-            centroid_px = (float(np.mean(xs)), float(np.mean(ys)))
 
-            centroid_dist = np.hypot(centroid_px[0], centroid_px[1])
+            centroid_p = (float(np.mean(xs)), float(np.mean(ys)))
+
+            centroid_dist = math.dist(centroid_p, (rx, ry))
 
             if (size < MIN_FRONTIER_SIZE or centroid_dist < MIN_FRONTIER_DIST):
                 continue
@@ -328,12 +333,7 @@ class FrontierSearch(Node):
             self.get_logger().debug("No new map recieved")
             return
         
-        # 2) Update robot pose information
-        robot_pose = self.get_robot_pose()
-        if robot_pose is None:
-            return
-        
-        # 3) Break down occupancy grid message
+        # 2) Break down occupancy grid message
         # Get msg from latest_map variable
         msg = self.latest_map
         # Process info from message
@@ -343,7 +343,7 @@ class FrontierSearch(Node):
         origin_x = msg.info.origin.position.x
         origin_y = msg.info.origin.position.y
 
-        # Process message data from 1D array to 2D array (grid)
+        # 3) Process message data from 1D array to 2D array (grid)
         grid = np.array(msg.data, dtype=np.int8).reshape((height, width))
 
         # 4) Determine mask grid for frontiers
