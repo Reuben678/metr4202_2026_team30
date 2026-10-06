@@ -257,7 +257,7 @@ class FrontierSearch(Node):
             if (size < MIN_FRONTIER_SIZE or centroid_dist < MIN_FRONTIER_DIST):
                 continue
 
-            clusters.append({"label": label_id, "size": size, "centroid_px": centroid_px})
+            clusters.append({"label": label_id, "size": size, "centroid_px": centroid_p})
 
         return clusters
 
