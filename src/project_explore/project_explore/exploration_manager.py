@@ -243,7 +243,7 @@ class ExplorationManager(Node):
 
         if (hasattr(self, "recovery_future")
                 and self.recovery_future is not None 
-                and not self.recovery_future.done())
+                and not self.recovery_future.done()):
             request = TriggerRecovery.Request()
             
             self.recovery_future = self.recovery_client.call_async(request)

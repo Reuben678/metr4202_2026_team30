@@ -75,8 +75,6 @@ class RecoveryHelper(Node):
         self.get_logger().info("RecoveryHelper node intialised")
 
     # Callback functions _______________________________________________________
-    def 
-
     def odom_callback(self, msg: Odometry):
         if msg is None:
             self.get_logger().warn("Odom data was not received")
@@ -95,7 +93,7 @@ class RecoveryHelper(Node):
         outcome = self.failure_recovery()
         if outcome:
             self.get_logger().info("Successfully recovered robot")
-        else
+        else:
             self.get_logger().info("Failed to recover robot")
         response.success = outcome
         return response
