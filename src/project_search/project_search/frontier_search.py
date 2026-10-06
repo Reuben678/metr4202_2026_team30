@@ -98,7 +98,6 @@ class FrontierSearch(Node):
         # Send an initial weights request
         self.send_request()
 
-        # Initially had FrontierData here, but not defined. Changed to GetFrontiers
         #MST client is also looking for get_frontiers
         self.frontier_srv = self.create_service(
             GetFrontiers,
@@ -157,7 +156,7 @@ class FrontierSearch(Node):
         """Request the latest utility weights asynchronously."""
 
         if not self.weight_client.service_is_ready():
-            self.get_logger().warning("UtilWeights service is not ready.")
+            self.get_logger().warn("UtilWeights service is not ready.")
             return
 
         if (hasattr(self, "weight_future") and self.weight_future is not None and not self.weight_future.done()):
