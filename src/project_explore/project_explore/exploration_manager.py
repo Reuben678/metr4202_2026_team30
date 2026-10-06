@@ -10,17 +10,20 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from .mst_planner import Frontier, MSTPlanner
 from .nav2_handler import NavigationResult, Nav2Handler
 
+from metr4202_interfaces import RecoveryTrigger
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
 
-    INITIALISING = auto()
-    REQUESTING_PLAN = auto()
-    SELECTING_GOAL = auto()
-    NAVIGATING = auto()
-    UPDATING_RECORDS = auto()
+    INITIALISE = auto()
+    REQUEST_PLAN = auto()
+    SELECT_GOAL = auto()
+    EXPLORATION = auto()
+    TRAVERSAL = auto()
+    RECOVERY = auto()
+    RECORDS = auto()
     COMPLETE = auto()
-
+    
 
 class ExplorationManager(Node):
     """Manage frontier planning and navigation."""
@@ -29,6 +32,8 @@ class ExplorationManager(Node):
         super().__init__("exploration_manager")
 
         self.state = ExplorationState.INITIALISING
+        self.recovery_future = None
+        self.recovery_outcome = None
 
         # Used to find the robot's current position on the generated map.
         self.tf_buffer = Buffer()
@@ -53,8 +58,21 @@ class ExplorationManager(Node):
         self.mission_complete = False
         self.dependencies_initialised = False
 
+        
+        # Create timer _________________________________________________________
         self.timer = self.create_timer(0.10, self.step)
-        self.get_logger().info("Exploration Manager initialised.")
+
+        # Create client ________________________________________________________
+        self.recovery_client = self.create_client(
+                RecoveryTrigger,
+                'recovery_node_service'
+                )
+        
+        while not self.recovery_client.wait_for_service(timeout_sec = 10.0):
+            self.get_logger().warn("RecoveryTrigger service is not available")
+        self.get_logger().info("RecoveryHelper service online")    
+
+        self.get_logger().info("Exploration Manager initialised.")        
 
     def dependencies_available(self) -> bool:
         """Wait for Nav2 once before exploration starts."""
@@ -120,7 +138,7 @@ class ExplorationManager(Node):
             # Clear the failed request so a fresh set of frontiers can be requested.
             self.get_logger().warning(f"Frontier plan not ready: {error}. Retrying...")
             self.frontier_future = None
-            self.state = ExplorationState.REQUESTING_PLAN
+            self.state = ExplorationState.REQUEST_PLAN
             return False
 
         # Only store the plan after ordered_frontiers has been successfully created.
@@ -162,7 +180,7 @@ class ExplorationManager(Node):
         """Send the selected frontier to Nav2."""
 
         if self.current_goal is None:
-            self.state = ExplorationState.REQUESTING_PLAN
+            self.state = ExplorationState.REQUEST_PLAN
             return
 
         self.get_logger().info(
@@ -181,14 +199,17 @@ class ExplorationManager(Node):
             return
 
         self.last_navigation_result = NavigationResult.FAILED
-        self.state = ExplorationState.UPDATING_RECORDS
+        self.state = ExplorationState.RECORDING
 
     def navigation_finished(self, result: NavigationResult) -> None:
         """Receive the final result from Nav2."""
 
         self.last_navigation_result = result
         self.navigation_started = False
-        self.state = ExplorationState.UPDATING_RECORDS
+        if (result == NavigationResult.FAILED):
+            self.state = ExplorationState.RECOVERY
+            return
+        self.state = ExplorationState.RECORDING
 
     def update_records(self) -> None:
         """Record whether the current frontier was reached or failed."""
@@ -212,50 +233,103 @@ class ExplorationManager(Node):
 
     def publish_mission_status(self) -> None:
         """Report that exploration has finished."""
-
         self.get_logger().info("Exploration complete.")
+
+    def trigger_recovery(self) -> None:
+
+        if not self.recovery_client.service_is_ready():
+            self.get_logger().warn("RecoveryHelper service is not ready")
+            return
+
+        if (hasattr(self, "recovery_future")
+                and self.recovery_future is not None 
+                and not self.recovery_future.done())
+            request = TriggerRecovery.Request()
+            
+            self.recovery_future = self.recovery_client.call_async(request)
+            self.recovery_future.add_done.callback(self.recovery_resp_callback)
+
+    def recovery_resp_callback(self, future) -> None:
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().error("RecoveryTrigger request failed: {error}")
+            self.recovery_future = None
+            return
+
+        if response is None:
+            self.get_logger().warning("RecoveryTrigger returned no response")
+            self.recovery_future = None
+            return
+
+        self.recovery_outcome = response.success
+        self.recovery_future = None
+        return
 
     def step(self) -> None:
         """Run the current stage of the exploration process."""
 
-        if self.state == ExplorationState.INITIALISING:
-            if self.dependencies_available():
-                self.state = ExplorationState.REQUESTING_PLAN
+        match self.state:
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.INITIALISE: # Initialise exploration node
+                if self.dependencies_available():
+                    self.state = ExplorationState.REQUEST_PLAN
+   
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.REQUEST_PLAN: # Request exploration plan
+                if self.frontier_future is None:
+                    self.request_plan()
+                elif self.process_frontier_response():
+                    self.state = ExplorationState.SELECT_GOAL
 
-        elif self.state == ExplorationState.REQUESTING_PLAN:
-            if self.frontier_future is None:
-                self.request_plan()
-            elif self.process_frontier_response():
-                self.state = ExplorationState.SELECTING_GOAL
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.SELECT_GOAL: # Select exploration frontier
+                self.current_goal = self.select_goal(self.ordered_frontiers)
 
-        elif self.state == ExplorationState.SELECTING_GOAL:
-            self.current_goal = self.select_goal(self.ordered_frontiers)
+                if self.current_goal is None:
+                    self.state = ExplorationState.COMPLETE
+                else:
+                    self.navigation_started = False
+                    self.state = ExplorationState.NAVIGATING
 
-            if self.current_goal is None:
-                self.state = ExplorationState.COMPLETE
-            else:
-                self.navigation_started = False
-                self.state = ExplorationState.NAVIGATING
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.EXPLORATION: # Explore with navigation
+                if not self.navigation_started:
+                    self.start_navigation()
+                else:
+                    self.nav2_handler.update()
 
-        elif self.state == ExplorationState.NAVIGATING:
-            if not self.navigation_started:
-                self.start_navigation()
-            else:
-                self.nav2_handler.update()
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.TRAVERSAL: # Traverse graph to new frontier
+                # 1) Select closest frontier node which has not been visited
+                # 2) Determine path of nodes to reach selected frontier
+                # 3) Call navigation traversal along path
 
-        elif self.state == ExplorationState.UPDATING_RECORDS:
-            self.update_records()
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.RECOVERY: # Call recovery node
+                self.trigger_recovery()
+                if self.recovery_outcome is not None:
+                    # Outcome has been updated to bool
+                    if self.recovery_outcome:
+                        # Recovery succeeded -> Attemp nav again
+                        self.state = ExplorationState.EXPLORATION      
+                    else:
+                        # Recovery failed
+                        self.state = ExplorationState.RECORDING
 
-            # The map and frontiers may have changed, so generate a fresh MST plan.
-            self.state = ExplorationState.REQUESTING_PLAN
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.RECORDING: # Update and record outcomes
+                self.update_records()
+                
+                self.state = ExplorationState.REQUEST_PLAN
 
-        elif self.state == ExplorationState.COMPLETE:
-            if not self.mission_complete:
-                self.publish_mission_status()
-                self.mission_complete = True
-                self.timer.cancel()
-                rclpy.shutdown()
-
+            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+            case ExplorationState.COMPLETE: # Mission complete, shutdown
+                if not self.mission_complete:
+                    self.publish_mission_status()
+                    self.mission_complete = True
+                    self.timer.cancel()
+                    rclpy.shutdown()
 
 def main(args=None) -> None:
     """Start the Exploration Manager node."""
