@@ -6,6 +6,11 @@ import networkx as nx
 from metr4202_interfaces.srv import GetFrontiers
 from rclpy.node import Node
 
+from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker
+
+NODE_MARKER_SIZE = 0.05     # [m] one map cell
+
 Position = Tuple[float, float]
 
 FRONTIER_COLS = 6       # Expected columns in frontier msg
@@ -36,6 +41,9 @@ class GraphManager:
     def __init__(self, node: Node) -> None:
         self.node = node
  
+        # RViz display of the graph nodes
+        self.marker_pub = self.node.create_publisher(Marker, "graph_nodes", 10)
+
         # Service client used to request the latest output from Frontier Search.
         self.frontier_client = self.node.create_client(GetFrontiers, "get_frontiers")
  
@@ -65,6 +73,7 @@ class GraphManager:
         )
         self.graph.add_node(self.START_NODE_ID, frontier=start)
         self.current_node_id = self.START_NODE_ID
+        self.publish_markers()
 
     def get_node(self, node_id: int) -> Frontier:
         return self.graph.nodes[node_id]["frontier"]
@@ -75,6 +84,33 @@ class GraphManager:
     def has_unvisited(self) -> bool:
         return any(not self.get_node(node_id).visited for node_id in self.graph.nodes)
     
+    def publish_markers(self) -> None:
+        """Publish every graph node position as a yellow cell for RViz."""
+
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.node.get_clock().now().to_msg()
+        marker.ns = "graph_nodes"
+        marker.id = 0
+        marker.type = Marker.CUBE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = NODE_MARKER_SIZE
+        marker.scale.y = NODE_MARKER_SIZE
+        marker.scale.z = 0.02      # Flat, sitting just above the map
+
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        for node_id in self.graph.nodes:
+            node = self.get_node(node_id)
+            marker.points.append(Point(x=node.x, y=node.y, z=0.01))
+
+        self.marker_pub.publish(marker)
+
     def request_frontiers(self) -> bool:
         if self.frontier_future is not None:
             return True
@@ -108,7 +144,8 @@ class GraphManager:
             node_id = self.add_frontier(frontier)
             if node_id is not None:
                 node_ids.append(node_id)
-        
+
+        self.publish_markers()
         return node_ids
 
     def send_end_search(self):
@@ -221,6 +258,7 @@ class GraphManager:
  
         self.get_node(node_id).visited = True
         self.current_node_id = node_id
+        self.publish_markers()
 
     def remove_node(self, node_id: int) -> bool:
         
@@ -232,6 +270,7 @@ class GraphManager:
             return False
         
         self.graph.remove_node(node_id)
+        self.publish_markers()
         self.node.get_logger().info(f"Removed unreachable node {node_id}")
         return True
     
