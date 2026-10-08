@@ -199,6 +199,22 @@ def generate_launch_description():
         ],
     )
 
+    recovery_helper = TimerAction(
+        period=20.0,
+        actions=[
+            Node(
+                package="project_explore",
+                executable="recovery_helper",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": use_sim_time,
+                    }
+                ],
+            )
+        ],
+    )
+
     return LaunchDescription(
         [
             declare_use_sim_time,
@@ -216,5 +232,6 @@ def generate_launch_description():
             util_weights,
             frontier_search,
             exploration_manager,
+            recovery_helper,
         ]
     )
