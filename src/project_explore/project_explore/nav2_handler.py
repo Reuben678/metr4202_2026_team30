@@ -117,7 +117,7 @@ class Nav2Handler:
                 case TaskResult.SUCCEEDED:
                     result = NavigationResult.SUCCEEDED
                     self.navigator.get_logger().info("Destination reached.")
-                case TaskResult.CANCELLED:
+                case TaskResult.CANCELED:
                     result = NavigationResult.CANCELLED
                     self.navigator.get_logger().warning("Navigation was cancelled.")
                 case TaskResult.FAILED:
