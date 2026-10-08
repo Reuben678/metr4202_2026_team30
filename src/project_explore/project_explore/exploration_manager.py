@@ -16,7 +16,7 @@ MAX_RECOVERY_CALLS = 3 # Allowed recovery calls per navigation goal
 
 SHUTDOWN_TIMEOUT = 5.0
 
-RECOVERY_TIMEOUT = 30
+RECOVERY_TIMEOUT = 60
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
@@ -54,7 +54,7 @@ class ExplorationManager(Node):
         self.last_navigation_result: Optional[NavigationResult] = None
 
         # recovery
-        self.recovery_called = True
+        self.recovery_start_time = None
         self.recovery_future = None
         self.recovery_outcome: Optional[bool] = None
         self.recovery_calls = 0
@@ -253,9 +253,14 @@ class ExplorationManager(Node):
 
         self.recovery_future = self.recovery_client.call_async(request)
         self.recovery_future.add_done_callback(self.recovery_resp_callback)
+        self.recovery_start_time = self.get_clock().now()
         self.get_logger().info("Recovery node called, awaiting reply...")
 
     def recovery_resp_callback(self, future) -> None:
+        if future is not self.recovery_future:
+            # Late recovery reply, already timedout
+            return
+
         try:
             response = future.result()
         except Exception as error:
@@ -334,21 +339,27 @@ class ExplorationManager(Node):
 
             # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
             case ExplorationState.RECOVERY: # Call recovery node
-                if not self.recovery_called:
-                    self.get_logger().info("Calling recovery")
-                    self.trigger_recovery()
+                if self.recovery_outcome is None:
+                    if self.recovery_future is None:
+                        self.get_logger().info("Calling recovery")
+                        self.trigger_recovery()
+                    else:
+                        elapsed = (self.get_clock().now() - self.recovery_start_time).nanoseconds / 1e9
+                        if elapsed > RECOVERY_TIMEOUT:
+                            self.get_logger().warn("Recovery timed out")
+                            self.recovery_future = None
+                            self.recovery_outcome = False
                     return
                 
-                if self.recovery_outcome is not None:
-                    outcome =self.recovery_outcome
-                    self.recovery_outcome = None
+                outcome = self.recovery_outcome
+                self.recovery_outcome = None
 
-                    if outcome:
-                        self.get_logger().info("Recovery success, navigating...")
-                        self.state = self.navigation_mode
-                    else:
-                        self.get_logger().warn("Recovery failed, goal abandoned")
-                        self.abandon_goal()
+                if outcome:
+                    self.get_logger().info("Recovery success, navigating...")
+                    self.state = self.navigation_mode
+                else:
+                    self.get_logger().warn("Recovery failed, goal abandoned")
+                    self.abandon_goal()
 
             # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
             case ExplorationState.COMPLETE: # Mission complete, shutdown
