@@ -97,11 +97,6 @@ class Nav2Handler:
         # Start a new timeout for this goal, not when the handler is created.
         self.navigator.goToPose(goal)
         self.navigation_start_time = self.navigator.get_clock().now()
-        self.navigator.get_logger().info(
-            f"Goal ({x:.2f}, {y:.2f}) robot={robot_position} "
-            f"heading={math.degrees(heading):.1f} deg "
-            f"z={goal.pose.orientation.z:.3f} w={goal.pose.orientation.w:.3f}"
-        )
         return True
 
     def update(self) -> None:
