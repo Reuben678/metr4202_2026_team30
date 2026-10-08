@@ -205,7 +205,6 @@ class FrontierSearch(Node):
         self.w_cost = response.w_cost
         self.w_info = response.w_info
 
-        self.get_logger().info(f"Updated utility weights: " f"w_info={self.w_info:.3f}, "f"w_cost={self.w_cost:.3f}")
         self.weight_future = None
 
     # Callback to read from BehaviorTreeLog topic
