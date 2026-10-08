@@ -56,7 +56,7 @@ class WeightCalc (Node):
         response.w_info = self.w_info
         response.w_cost = self.w_cost
 
-        self.get_logger().info(f"Weights provided were {self.w_info} & {self.w_cost}")
+        self.get_logger().info(f"Weights provided were {self.w_info:.3f} & {self.w_cost:.3f}")
 
         return response
     
