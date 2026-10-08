@@ -101,13 +101,19 @@ class GraphManager:
         marker.scale.y = NODE_MARKER_SIZE
         marker.scale.z = 0.02      # Flat, sitting just above the map
 
-        marker.color.r = 1.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
-
         for node_id in self.graph.nodes:
             node = self.get_node(node_id)
+            if node.visited:
+                marker.color.r = 0.0
+                marker.color.g = 1.0
+                marker.color.b = 0.0
+                marker.color.a = 1.0
+            else:
+                marker.color.r = 1.0
+                marker.color.g = 1.0
+                marker.color.b = 0.0
+                marker.color.a = 1.0
+
             marker.points.append(Point(x=node.x, y=node.y, z=0.01))
 
         self.marker_pub.publish(marker)
