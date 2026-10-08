@@ -1,5 +1,7 @@
-# Request: empty trigger call
+# Request:
+bool end_search
 ---
+# Response
 FrontierArray frontiers
 bool success
-bool complete
+bool empty

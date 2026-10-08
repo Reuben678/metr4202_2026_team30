@@ -4,93 +4,122 @@ Author: Mitchell Crawford (s4584081)
 METR4202, Sem2, 2026
 """
 
-import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
-from rclpy.action import ActionClient
+import math
+from typing import Optional, Tuple
 
+import numpy as np
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+
+from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
+from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import Odometry
+from nav2_msgs.action import DriveOnHeading, Spin
+
 from metr4202_interfaces.srv import RecoveryTrigger
 
-from nav_msgs.msg import Odometry
-from nav_msgs.msg import OccupancyGrid
-
-from nav2_msgs.action import DriveOnHeading, Spin
-from nav2_msgs.msg import BehaviorTreeLog
-
-from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-
-#from metr4202_interfaces.srv import RecoveryTrigger
-
-import math
-import numpy as np
 
 # Defined Macros
-RECOVERY_ATTEMPTS = 3
-RECOVERY_PERIOD = 10
-MIN_RADIUS = 8
-MAX_RADIU = 12
-RADIAL_STEP = 1
-YAW_STEP = 15
+RECOVERY_ATTEMPTS = 3       # Spin + drive attempts per recovery request
+RECOVERY_PERIOD = 10        # Time allowance for a spin [s]
+SERVER_TIMEOUT = 5.0        # Wait for a Nav2 behaviour server [s]
+MIN_RADIUS = 0.3            # Minimum recovery drive distance [m]
+MAX_RADIUS = 1.0            # Maximum recovery drive distance [m]
+RADIAL_STEP = 0.1           # Spacing of costmap samples along a bearing [m]
+YAW_STEP = 15               # Spacing of bearings searched [deg]
+DRIVE_SPEED = 0.05          # Recovery drive speed [m/s]
+DRIVE_MARGIN = 5            # Extra time allowance on top of distance / speed [s]
+SHUTDOWN_DELAY = 1.0        # Delay after replying before shutdown [s]
+
+# Costmap values (nav_msgs/OccupancyGrid scaling of the Nav2 costmap)
+UNKNOWN_COST = -1
+INSCRIBED_COST = 99
+LETHAL_COST = 100
+MAX_TRAVERSABLE_COST = 98   # Highest cost the recovery drive may pass through
 
 class RecoveryHelper(Node):
     def __init__(self):
         super().__init__('RecoveryHelper')
 
         # Class variables ______________________________________________________
-        self.navigator = BasicNavigator()
         self.latest_odom = None
         self.latest_costmap = None
-        self.current_goal = None
+        self.recovering = False
+        self.shutdown_timer = None
 
-        # Create timer _________________________________________________________
-        #self.timer = self.create_timer(5.0, self.timer_tick)
+        # The service callback waits on action results, so the service and the
+        # action clients share a reentrant group and the node runs on a
+        # MultiThreadedExecutor (see main). Otherwise the callback deadlocks.
+        self.cb_group = ReentrantCallbackGroup()
 
         # Create action clients ________________________________________________
-        self.spin_client = ActionClient(self, Spin, 'spin')
-        self.drive_client = ActionClient(self, DriveOnHeading, 'drive_on_heading')
+        self.spin_client = ActionClient(
+                self, Spin, 'spin',
+                callback_group=self.cb_group
+                )
+        self.drive_client = ActionClient(
+                self, DriveOnHeading, 'drive_on_heading',
+                callback_group=self.cb_group
+                )
 
+        # Create subscriptions _________________________________________________
         self.sub_odom = self.create_subscription(
                 Odometry,
-                '/odom/',
+                '/odom',
                 self.odom_callback,
                 10
                 )
 
         self.sub_costmap = self.create_subscription(
-                local_costmap,
-                'local_costmap/costmap',
+                OccupancyGrid,
+                '/local_costmap/costmap',
                 self.costmap_callback,
                 10
                 )
 
+        # Create service _______________________________________________________
         self.recovery_srv = self.create_service(
                 RecoveryTrigger,
-                'call_recovery',
-                self.recovery_callback
+                '/recovery_node_service',
+                self.recovery_callback,
+                callback_group=self.cb_group
                 )
-
-        self.navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
         
         self.get_logger().info("RecoveryHelper node intialised")
 
     # Callback functions _______________________________________________________
     def odom_callback(self, msg: Odometry):
-        if msg is None:
-            self.get_logger().warn("Odom data was not received")
-            return
         self.latest_odom = msg
 
-    def costmap_callback(self, msg: Costmap):
-        if msg is None:
-            self.get_logger().warn("Local costmap data was not received")
-            return
+    def costmap_callback(self, msg: OccupancyGrid):
         self.latest_costmap = msg
 
     def recovery_callback(self, request, response):
-        
+
+        if request.complete:
+            # Reply first, then shut down shortly after so the reply is delivered
+            self.get_logger().info("Exploration complete, RecoveryHelper shutting down...")
+            response.success = True
+            if self.shutdown_timer is None:
+                self.shutdown_timer = self.create_timer(SHUTDOWN_DELAY, self.shutdown_callback)
+            return response
+
+        if self.recovering:
+            self.get_logger().warn("Recovery already in progress, rejecting request")
+            response.success = False
+            return response
+
         # Trigger a manual failure recovery
-        outcome = self.failure_recovery()
+        self.recovering = True
+        try:
+            outcome = self.failure_recovery()
+        finally:
+            self.recovering = False
+
         if outcome:
             self.get_logger().info("Successfully recovered robot")
         else:
@@ -98,178 +127,221 @@ class RecoveryHelper(Node):
         response.success = outcome
         return response
 
+    def shutdown_callback(self):
+        self.shutdown_timer.cancel()
+        rclpy.shutdown()
+
     # Node Methods _____________________________________________________________
-    def get_robot_pose(self) -> tuple[float, float, float]:
+    def get_robot_pose(self) -> Optional[Tuple[float, float, float]]:
+        """Robot (x, y, yaw) in the odom frame."""
         if self.latest_odom is None:
             self.get_logger().warn("Could not gather pose from odom")
             return None
         px = self.latest_odom.pose.pose.position.x
         py = self.latest_odom.pose.pose.position.y
-        pw = self.latest_odom.pose.pose.orientation.w
-        return (px, py, pw)
+        qw = self.latest_odom.pose.pose.orientation.w
+        qz = self.latest_odom.pose.pose.orientation.z
+        pyaw = 2 * math.atan2(qz, qw)
+        return (px, py, pyaw)
 
-    def get_local_costmap(self):
+    def get_local_costmap(self) -> Optional[OccupancyGrid]:
         if self.latest_costmap is None:
             self.get_logger().warn("Failed to get local costmap data")
             return None
         return self.latest_costmap
 
-    def check_nav_active(self) -> bool:
-        self.navigator.get_logger().info("Waiting for Navigation action server")
-        ready = false
-
-        for check in range(5):
-            ready = self.navigator.nav_to_pose_client.wait_for_server(timeout_sec = 5.0)
-            if ready:
-                return True
-            self.navigator.get_logger().info("Navigation action server not avialable, waiting...")
-
-        self.get_logger().error("Navigator server was never avaialable")
-        return False
-
     def failure_recovery(self) -> bool:
 
         self.get_logger().warn("### Failure recovery called ###")
-        recovery_successs = False
 
-        for attempt in range(RECOVERY_ATTEMPTS):
-            self.get_logger().info(f"Attempt no. {attempt}")
+        # Get current data
+        robot = self.get_robot_pose()
+        costmap = self.get_local_costmap()
 
-            # Get current data
-            robot = self.get_robot_pose()
-            costmap = self.get_local_costmap()
+        if robot is None:
+            self.get_logger().error(f"Attempt failed due to odom")
+            return False
+        if costmap is None:
+            self.get_logger().error(f"Attempt failed due to costmap")
+            return False
 
-            if (pose or costmap is None):
-                self.get_logger().error(f"Attempt {attempt} failed due to no data")
-                continue
-            else:
-                rx, ry, rw = pose[0], pose[1], pose[2]
-                info = costmap.info
-                grid = np.array(costmap.data, dtype=np.int8)
-                grid = grid.reshape((info.height, info.width))
+        # Odom pose and local costmap must share a frame for the search to be valid
+        odom_frame = self.latest_odom.header.frame_id
+        if costmap.header.frame_id != odom_frame:
+            self.get_logger().warn(
+                f"Local costmap frame '{costmap.header.frame_id}' differs from "
+                f"odom frame '{odom_frame}', recovery pose may be offset"
+            )
 
-            gx, gy = self.get_recovery_pose(px, py, grid, info)
+        rx, ry, ryaw = robot
+        info = costmap.info
+        grid = np.array(costmap.data, dtype=np.int8).reshape((info.height, info.width))
 
-            spin_success = self.manual_spin(px, py, pw, goal)
-            if not spin_success:
-                self.get_logger().warn("Spin failed")
-                continue
+        target = self.get_recovery_pose((rx, ry), grid, info)
+        if target is None:
+            self.get_logger().warn("No clear direction found in the local costmap")
+            return False
 
-            drive_success = self.manual_drive(px, py, pw, goal)
-            if not drive_success:
-                self.get_logger().warn("Drive failed")
-                continue
+        gx, gy = target
+        self.get_logger().info(f"Recovery target ({gx:.2f}, {gy:.2f})")
 
-            return True
-        self.get_logger().warn(f"Recovery failed after {RECOVERY_ATTEMPTS}")
+        if not self.manual_spin(rx, ry, ryaw, (gx, gy)):
+            self.get_logger().warn("Spin failed")
+            return False
+
+        if not self.manual_drive(rx, ry, (gx, gy)):
+            self.get_logger().warn("Drive failed")
+            return False
+
+        return True
+
+        self.get_logger().warn(f"Recovery failed after attempt")
         return False
     
-    def manual_spin(self, px, py, pw, goal) -> bool:
+    def manual_spin(self, px, py, pyaw, goal_pose) -> bool:
+        """Spin in place to face goal_pose."""
 
-        dx = abs(px) - abs(goal[0])
-        dy = abs(py) - abs(goal[1])
+        goal_yaw = math.atan2(goal_pose[1] - py, goal_pose[0] - px)
+        # Wrap to [-pi, pi] so the robot takes the shorter turn
+        delta_yaw = math.atan2(math.sin(goal_yaw - pyaw), math.cos(goal_yaw - pyaw))
 
-        goal_yaw = atan2(dx, dy)
-        delta_yaw = math.atan(np.sin(goal_yaw - pw), np.cos(goal_yaw - pw))
-
-        if not self.spin_client.server_is_ready():
-            self.get_logger().warn("spin server is not ready")
+        if not self.spin_client.wait_for_server(timeout_sec=SERVER_TIMEOUT):
+            self.get_logger().warn("Spin server is not ready")
             return False
 
         goal = Spin.Goal()
-        goal.target_yaw = float(delta_yaw)
-        goal.target_allowance = Duration(sec=RECOVERY_PERIOD)
-    
+        goal.target_yaw = float(delta_yaw)      # Relative to the current heading
+        goal.time_allowance = Duration(sec=RECOVERY_PERIOD)
 
-        response = self.spin_client.send_goal(goal)
-        self.get_logger().info("Spin action sent for {delta_yaw:.5f}")
+        self.get_logger().info(f"Spin action sent for {math.degrees(delta_yaw):.1f} deg")
 
-        return (response is not None and 
-                response.status == GoalStatus.STATUS_SUCCEEDED)
+        # Blocks this callback until the result; safe with the MultiThreadedExecutor
+        result = self.spin_client.send_goal(goal)
 
-    def manual_drive(self, px, py, goal) -> bool:
-        
-        if not self.drive_client.wait_for_server(timeout_sec=RECOVERY_PERIOD):
+        return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
+
+    def manual_drive(self, px, py, goal_pose) -> bool:
+        """Drive forward along the current heading to goal_pose."""
+
+        if not self.drive_client.wait_for_server(timeout_sec=SERVER_TIMEOUT):
             self.get_logger().warn("Drive_on_heading server not ready")
             return False
 
+        distance = math.dist((px, py), goal_pose)
+
         goal = DriveOnHeading.Goal()
-        goal.target.x = float(math.dist((px,py), goal))
-        # REVERSE OR FORWARD CHECKING???
+        goal.target.x = float(distance)         # Forward, the robot already faces the target
         goal.speed = DRIVE_SPEED
-        goal.time_allowance = Duration(sec=RECOVERY_PERIOD)
+        # Allow enough time to cover the distance at DRIVE_SPEED
+        goal.time_allowance = Duration(sec=int(math.ceil(distance / DRIVE_SPEED)) + DRIVE_MARGIN)
 
-        response = self.drive_client.send_goal(goal)
+        self.get_logger().info(f"Drive action sent for {distance:.2f} m")
 
-        return (response is not None and 
-                response.status == GoalStatus.STATUS_SUCCEEDED)
+        result = self.drive_client.send_goal(goal)
+
+        return result is not None and result.status == GoalStatus.STATUS_SUCCEEDED
     
-    def world_to_grid(self, wx, wy, info) -> tuple[int, int]:
+    def world_to_grid(self, wx, wy, info) -> Optional[Tuple[int, int]]:
         ox, oy = info.origin.position.x, info.origin.position.y
 
         gx = math.floor((wx - ox) / info.resolution)
         gy = math.floor((wy - oy) / info.resolution)
 
-        if (0 <= gx <= info.width) and (0 <= gy <= info.height):
+        if (0 <= gx < info.width) and (0 <= gy < info.height):
             return gx, gy
         return None
 
-    def grid_to_world(self, gx, gy, info) -> tuple[float, float]:
+    def grid_to_world(self, gx, gy, info) -> Tuple[float, float]:
         
-        wx = info.origin.position.x + (gx + 0.05) * info.resolution
-        wy = info.origin.position.y + (gy + 0.05) * info.resolution
+        wx = info.origin.position.x + (gx + 0.5) * info.resolution
+        wy = info.origin.position.y + (gy + 0.5) * info.resolution
 
-        return float(wx, wy)
+        return wx, wy
 
-    def get_recovery_pose(self, pose, grid, info) -> tuple[float, float]:
-        
-        gx, gy = self.world_to_grid(pose[0], pose[1], info)
+    def ray_cost(self, origin, yaw, radius, grid, info) -> int:
+        """Highest cost along the ray from origin out to radius along yaw."""
+
+        worst = 0
+        steps = int(round(radius / RADIAL_STEP))
+        for step in range(1, steps + 1):
+            r = step * RADIAL_STEP
+            worst = max(worst, self.get_cost(
+                (origin[0] + r * math.cos(yaw), origin[1] + r * math.sin(yaw)), grid, info
+            ))
+        return worst
+
+    def get_recovery_pose(self, pose, grid, info) -> Optional[Tuple[float, float]]:
+        """
+        Search bearings for a traversable path of at least MIN_RADIUS, march each one
+        out towards MAX_RADIUS while it stays traversable, and pick the bearing that
+        reaches furthest (ties go to the lowest cost). Returns a world (odom) position.
+        """
 
         # Search bearings from 0 to 2pi
-        bearings = np.linspace(0, 2*np.pi, (360 / YAW_STEP), endpoint=false)
-        ideal_yaw = 0
+        bearings = np.linspace(0, 2 * np.pi, (360 // YAW_STEP), endpoint=False)
 
-        # Search across bearings
+        best = None     # (reach, -cost, yaw)
         for yaw in bearings:
-            xs = gx + MIN_RADIUS * np.cos(yaw)
-            ys = gy + MIN_RADIUS * np.sin(yaw)
+            yaw = float(yaw)
 
-            cost = self.get_cost((xs, ys), grid, True)
+            # Path out to MIN_RADIUS must be traversable
+            cost = self.ray_cost(pose, yaw, MIN_RADIUS, grid, info)
+            if cost > MAX_TRAVERSABLE_COST:
+                continue
 
-            ideal_yaw = (ideal_yaw + (yaw * cost)) / 2
+            # March radius along this bearing until the path is no longer traversable
+            reach = MIN_RADIUS
+            radius = MIN_RADIUS + RADIAL_STEP
+            while radius <= MAX_RADIUS + 1e-6:
+                point = (pose[0] + radius * math.cos(yaw), pose[1] + radius * math.sin(yaw))
+                if self.get_cost(point, grid, info) > MAX_TRAVERSABLE_COST:
+                    break
+                reach = radius
+                radius += RADIAL_STEP
 
-        # March radius along ideal bearing
-        ideal_radius = MIN_RADIUS
-        for radius in range(MIN_RADIUS, MAX_RADIUS, RADIAL_STEP):
-            xs = gx + radius * np.cos(ideal_yaw)
-            yx = gy + radius * np.sin(ideal_yaw)
+            candidate = (reach, -cost, yaw)
+            if best is None or candidate > best:
+                best = candidate
 
-            cost = self.get_cost((xs, ys), grid, True)
+        if best is None:
+            return None
 
-            ideal_radius = (ideal_radius + (radius * cost)) / 2
+        reach, _, yaw = best
+        return (pose[0] + reach * math.cos(yaw),
+                pose[1] + reach * math.sin(yaw))
 
-        recovery_pose = ((gx + ideal_radius * np.cos(ideal_yaw)),
-                            gy + ideal_radius * np.sin(ideal_yaw))
-        return recovery_pose
+    def get_cost(self, point, grid, info) -> int:
+        """Cost of the cell at a world (odom) point; outside the costmap counts as lethal."""
 
-    def get_cost(self, pose, grid, invert:bool) -> int:
-        cost = int(grid[pose[0], pose[1]])
+        cell = self.world_to_grid(point[0], point[1], info)
+        if cell is None:
+            return LETHAL_COST
+
+        gx, gy = cell
+        cost = int(grid[gy, gx])        # grid is [row, col] = [y, x]
+
         # Cost determination
-        match cost:
-            case -1:    #   UKNWOWN Cost
-                cost = 100
-            case 99:    # INSCRIBED Cost
-                cost = 100
-            case 100:   # LETHAL Cost
-                cost = 100
-            case _:     # Cost is 0 - 98
-                cost = cost
-
-        # Invert cost if flagged
-        if invert:
-            return 100 - cost
+        if cost in (UNKNOWN_COST, INSCRIBED_COST, LETHAL_COST):
+            return LETHAL_COST
         return cost
 
-    def destroy_navigator(self) -> None:
-        self.navigator.destroy_node()
+def main():
+    rclpy.init()
 
+    recovery_helper = RecoveryHelper()
+    executor = MultiThreadedExecutor()
+    executor.add_node(recovery_helper)
+
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        executor.shutdown()
+        recovery_helper.destroy_node()
+
+        if rclpy.ok():
+            rclpy.shutdown()
+        
+if __name__ == "__main__":
+    main()

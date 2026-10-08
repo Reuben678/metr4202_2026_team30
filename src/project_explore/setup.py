@@ -32,6 +32,7 @@ setup(
     entry_points={
         'console_scripts': [
             'exploration_manager = project_explore.exploration_manager:main',
+            'recovery_helper = project_explore.recovery_helper:main',
         ],
     },
 )

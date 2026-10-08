@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     "msg/FrontierArray.msg"
     "srv/GetFrontiers.srv"
     "srv/UtilWeights.srv"
+    "srv/RecoveryTrigger.srv"
     DEPENDENCIES std_msgs
 )
 

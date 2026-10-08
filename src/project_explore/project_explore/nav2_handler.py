@@ -1,5 +1,5 @@
 from enum import Enum, auto
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
@@ -55,9 +55,17 @@ class Nav2Handler:
         while not self.navigator.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
             self.navigator.get_logger().info("NavigateToPose action server not available, waiting...")
 
+        self.navigator.get_logger().info("Waiting for bt_navigator to become active...")
+        self.navigator._waitForNodeToActivate("bt_navigator")
+
         self.navigator.get_logger().info("NavigateToPose action server is available.")
 
-    def navigate_to(self, x: float, y: float, result_callback: Callable[[NavigationResult], None]) -> bool:
+    def navigate_to(self,
+                        x: float, 
+                        y: float, 
+                        result_callback: Callable[[NavigationResult], None],
+                        robot_position: Optional[Tuple[float, float]] = None,
+        ) -> bool:
         """Send a map position to Nav2 as the next navigation goal."""
 
         if self.navigation_active:
@@ -71,22 +79,29 @@ class Nav2Handler:
         goal.pose.position.y = y
         goal.pose.position.z = 0.0
 
-        px, py = get_robot_pose()
         # Determine an approx orientation we will end in
-        orientation = math.atan2((py - y), (px - x))
-
+        heading = 0.0        
+        if robot_position is not None:
+            px, py = robot_position
+            heading = math.atan2((y - py), (x - px))
+        
         # End in an orientation in that aligns with direction
         goal.pose.orientation.x = 0.0
         goal.pose.orientation.y = 0.0
-        goal.pose.orientation.z = 0.0
-        goal.pose.orientation.w = orientation
+        goal.pose.orientation.z = math.sin(heading / 2.0)
+        goal.pose.orientation.w = math.cos(heading / 2.0)
 
         self.result_callback = result_callback
         self.navigation_active = True
 
         # Start a new timeout for this goal, not when the handler is created.
-        self.navigation_start_time = self.navigator.get_clock().now()
         self.navigator.goToPose(goal)
+        self.navigation_start_time = self.navigator.get_clock().now()
+        self.navigator.get_logger().info(
+            f"Goal ({x:.2f}, {y:.2f}) robot={robot_position} "
+            f"heading={math.degrees(heading):.1f} deg "
+            f"z={goal.pose.orientation.z:.3f} w={goal.pose.orientation.w:.3f}"
+        )
         return True
 
     def update(self) -> None:
@@ -149,8 +164,10 @@ class Nav2Handler:
         if not self.navigation_active:
             return
 
-        self.navigator.get_logger().warning("Cancelling current navigation goal.")
-        self.navigator.cancelTask()
+        goal_handle = getattr(self.navigator, "goal_handle", None)
+        if self.navigator.result_future is not None and goal_handle is not None:
+            goal_handle.cancel_goal_async()
+            self.navigator.get_logger().warning("Cancelling current navigation goal.")
 
     def destroy(self) -> None:
         """Destroy the BasicNavigator ROS node."""

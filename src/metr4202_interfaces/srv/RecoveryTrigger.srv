@@ -1,6 +1,6 @@
 # Request:
-# Empty Recovery trigger
-___
+bool complete   # Shutdown node trigger
+---
 # Response
 bool success
 
