@@ -70,6 +70,7 @@ class GraphManager:
             y = robot_position[1],
             path_distance = 0.0,
             utility = 0.0,
+            visited = True,
         )
         self.graph.add_node(self.START_NODE_ID, frontier=start)
         self.current_node_id = self.START_NODE_ID

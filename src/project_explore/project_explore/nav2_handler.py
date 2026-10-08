@@ -95,7 +95,12 @@ class Nav2Handler:
         self.navigation_active = True
 
         # Start a new timeout for this goal, not when the handler is created.
-        self.navigator.goToPose(goal)
+        if not self.navigator.goToPose(goal):
+            self.navigator.get_logger().warning("Navigation goal was rejected")
+            return False
+        
+        self.result_callback = result_callback
+        self.navigation_active = True
         self.navigation_start_time = self.navigator.get_clock().now()
         return True
 
@@ -104,6 +109,37 @@ class Nav2Handler:
 
         if not self.navigation_active:
             return
+        
+        if self.navigator.isTaskComplete():
+            task_result = self.navigator.getResult()
+
+            match task_result:
+                case TaskResult.SUCCEEDED:
+                    result = NavigationResult.SUCCEEDED
+                    self.navigator.get_logger().info("Destination reached.")
+                case TaskResult.CANCELLED:
+                    result = NavigationResult.CANCELLED
+                    self.navigator.get_logger().warning("Navigation was cancelled.")
+                case TaskResult.FAILED:
+                    result = NavigationResult.FAILED
+                    self.navigator.get_logger().warning("Navigation failed")
+            
+            self.finish_navigation(result)
+            return
+        
+        if self.navigation_start_time is not None:
+            elapsed = (self.navigator.get_clock().now() -
+                        self.navigation_start_time).nanoseconds / 1e9
+            
+            if elapsed > self.navigation_timeout:
+                self.navigator.get_logger().warn("Navigation timeout")
+                self.cancel_goal()
+                self.finish_navigation(NavigationResult.FAILED)
+                return
+        
+        feedback = self.navigator.getFeedback()
+        if feedback is not None:
+            self.navigator.get_logger().debug(f"Distance remaining: {feedback.distance_remaining:.2f} m")
 
         # Check the timeout while navigation is active so a stuck goal is cancelled.
         if self.navigation_start_time is not None:
@@ -123,21 +159,6 @@ class Nav2Handler:
                 self.navigator.get_logger().debug(f"Distance remaining: {feedback.distance_remaining:.2f} m")
 
             return
-
-        task_result = self.navigator.getResult()
-
-        if task_result == TaskResult.SUCCEEDED:
-            result = NavigationResult.SUCCEEDED
-            self.navigator.get_logger().info("Destination reached.")
-        elif task_result == TaskResult.CANCELED:
-            result = NavigationResult.CANCELLED
-            self.navigator.get_logger().warning("Navigation was cancelled.")
-        else:
-            result = NavigationResult.FAILED
-            self.navigator.get_logger().warning("Navigation failed.")
-
-            pass
-        self.finish_navigation(result)
 
     def finish_navigation(self, result: NavigationResult) -> None:
         """Clear the current goal and report its result to the Exploration Manager."""
