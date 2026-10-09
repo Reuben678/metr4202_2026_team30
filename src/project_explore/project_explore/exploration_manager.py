@@ -10,25 +10,17 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from .graph_manager import Frontier, GraphManager
 from .nav2_handler import NavigationResult, Nav2Handler
 
-from metr4202_interfaces.srv import RecoveryTrigger
-
-MAX_RECOVERY_CALLS = 3 # Allowed recovery calls per navigation goal
-
-SHUTDOWN_TIMEOUT = 5.0
-
-RECOVERY_TIMEOUT = 60
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
 
-    INITIALISE = auto()
-    REQUEST_PLAN = auto()
-    SELECT_GOAL = auto()
-    EXPLORATION = auto()
-    TRAVERSAL = auto()
-    RECOVERY = auto()
+    INITIALISING = auto()
+    REQUESTING_PLAN = auto()
+    SELECTING_GOAL = auto()
+    NAVIGATING = auto()
+    UPDATING_RECORDS = auto()
     COMPLETE = auto()
-    
+
 
 class ExplorationManager(Node):
     """Manage frontier planning and navigation."""
@@ -36,8 +28,8 @@ class ExplorationManager(Node):
     def __init__(self) -> None:
         super().__init__("exploration_manager")
 
-        self.state = ExplorationState.INITIALISE
-        
+        self.state = ExplorationState.INITIALISING
+
         # Used to find the robot's current position on the generated map.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -46,41 +38,15 @@ class ExplorationManager(Node):
         self.graph_manager = GraphManager(self)
         self.nav2_handler = Nav2Handler()
 
-        # Navigation
         self.current_goal: Optional[Frontier] = None
-        self.traversal_path: List[Frontier] = []
-        self.navigation_mode = ExplorationState.EXPLORATION
-        self.navigation_started = False
         self.last_navigation_result: Optional[NavigationResult] = None
 
-        # recovery
-        self.recovery_start_time = None
-        self.recovery_future = None
-        self.recovery_outcome: Optional[bool] = None
-        self.recovery_calls = 0
-
-
-        # Completion
-        self.completion_futures = []
-        self.completion_start_time = None
-        self.completion_requested = False
+        self.navigation_started = False
         self.mission_complete = False
         self.dependencies_initialised = False
 
-        # Create timer _________________________________________________________
-        self.timer = self.create_timer(1.0, self.step)
-
-        # Create client ________________________________________________________
-        self.recovery_client = self.create_client(
-                RecoveryTrigger,
-                '/recovery_node_service'
-                )
-        
-        while not self.recovery_client.wait_for_service(timeout_sec = 10.0):
-            self.get_logger().warn("RecoveryTrigger service is not ready, waiting")
-        
-        self.get_logger().info("RecoveryHelper service online")    
-        self.get_logger().info("Exploration Manager initialised.")        
+        self.timer = self.create_timer(0.10, self.step)
+        self.get_logger().info("Exploration Manager initialised.")
 
     def dependencies_available(self) -> bool:
         """Wait for Nav2 once before exploration starts."""
@@ -106,280 +72,172 @@ class ExplorationManager(Node):
         translation = transform.transform.translation
         return translation.x, translation.y
 
-    # Planning state ___________________________________________________________
-    def request_plan(self) -> None:
-        
-        if not self.graph_manager.request_frontiers():
-            return False
+    def select_next_goal(self) -> Optional[Frontier]:
+        """Choose the next graph node to navigate towards."""
 
-        try:
-            node_ids = self.graph_manager.process_frontier_response()
-        except (ValueError, RuntimeError) as error:
-            self.get_logger().warning(f"Frontier response not usable, retrying {error}")
-            return False
-        
-        if node_ids is None:
-            return False
-        
-        self.get_logger().info(
-            f"{len(node_ids)} frontier node(s) added or updated at node"
-            f"{self.graph_manager.current_node_id}"
-        )
-        return True
+        # First, prioritise unvisited neighbouring frontiers.
+        frontier = self.graph_manager.select_goal()
 
-    def select_next(self) -> None:
+        if frontier is not None:
+            self.get_logger().info(f"Selected neighbouring frontier {frontier.frontier_id}")
+            return frontier
 
-        goal = self.graph_manager.select_goal()
+        # Otherwise, find the shortest route to an unvisited frontier.
+        route = self.graph_manager.plan_traversal()
 
-        if goal is not None:
-            self.begin_navigation(goal, ExplorationState.EXPLORATION)
-            return
-        
-        path = self.graph_manager.plan_traversal()
+        if route:
+            next_node = route[0]
 
-        if path:
-            self.traversal_path = path
-            self.get_logger().info(
-                f"No local frontiers, traversing {len(path)} node(s) to node {path[-1].frontier_id}"
-            )
-            self.begin_navigation(self.traversal_path[0], ExplorationState.TRAVERSAL)
-            return
+            self.get_logger().info(f"Dijkstra selected graph node {next_node.frontier_id}")
 
-        self.state = ExplorationState.COMPLETE
+            return next_node
 
-    # Navigation _______________________________________________________________
-    def begin_navigation(self, goal: Frontier, mode: ExplorationState) -> None:
+        return None
 
-        self.current_goal = goal
-        self.navigation_mode = mode
-        self.navigation_started = False
-        self.last_navigation_result = None
-        self.recovery_calls = 0
-        self.state = mode
-    
     def start_navigation(self) -> None:
+        """Send the selected frontier to Nav2."""
+
+        if self.current_goal is None:
+            self.state = ExplorationState.REQUESTING_PLAN
+            return
+
+        # Get the robot's current position to calculate goal orientation.
+        robot_position = self.get_robot_position()
+
+        if robot_position is None:
+            self.get_logger().warning(
+                "Cannot navigate: robot position unavailable."
+            )
+            return
 
         self.get_logger().info(
-            f"Sending node {self.current_goal.frontier_id}:"
+            f"Sending frontier {self.current_goal.frontier_id}: "
             f"({self.current_goal.x:.2f}, {self.current_goal.y:.2f})"
         )
 
+        # Send the goal and current robot position to Nav2 Handler.
         goal_sent = self.nav2_handler.navigate_to(
             self.current_goal.x,
             self.current_goal.y,
             self.navigation_finished,
-            self.get_robot_position()
+            robot_position=robot_position,
         )
 
         if goal_sent:
             self.navigation_started = True
             return
-        
+
+        # Handle a rejected navigation goal.
         self.last_navigation_result = NavigationResult.FAILED
+        self.state = ExplorationState.UPDATING_RECORDS
 
     def navigation_finished(self, result: NavigationResult) -> None:
+        """Receive the final result from Nav2."""
 
         self.last_navigation_result = result
-    
-    def drive_navigation(self) -> None:
+        self.navigation_started = False
+        self.state = ExplorationState.UPDATING_RECORDS
 
-        if self.last_navigation_result is not None:
-            result = self.last_navigation_result
-            self.last_navigation_result = None
-            self.navigation_started = False
-        
-            if result == NavigationResult.SUCCEEDED:
-                self.goal_reached()
-            else:
-                self.navigation_failed()
+    def update_records(self) -> None:
+        """Update the graph after navigation finishes."""
+
+        if self.current_goal is None:
             return
-        
-        if not self.navigation_started:
-            self.start_navigation()
+
+        node_id = self.current_goal.frontier_id
+
+        if self.last_navigation_result == NavigationResult.SUCCEEDED:
+
+            self.graph_manager.mark_reached(node_id)
+
+            self.get_logger().info(
+                f"Reached graph node {node_id}."
+            )
+
         else:
-            self.nav2_handler.update()
-        
-    def goal_reached(self) -> None:
+            self.graph_manager.remove_node(node_id)
 
-        self.get_logger().info(f"Reached node {self.current_goal.frontier_id}")
-        self.graph_manager.mark_reached(self.current_goal.frontier_id)
+            self.get_logger().warning(
+                f"Failed to reach graph node {node_id}."
+            )
 
-        if self.navigation_mode == ExplorationState.TRAVERSAL:
-            self.traversal_path.pop(0)
-
-            if self.traversal_path:
-                self.begin_navigation(self.traversal_path[0], ExplorationState.TRAVERSAL)
-                return
-        
         self.current_goal = None
-        self.state = ExplorationState.REQUEST_PLAN
-        
-    def navigation_failed(self) -> None:
+        self.last_navigation_result = None
+        self.navigation_started = False
 
-        if self.recovery_calls < MAX_RECOVERY_CALLS:
-            self.recovery_calls += 1
-            self.state = ExplorationState.RECOVERY
-            return
-        
-        self.abandon_goal()
-    
-    def abandon_goal(self) -> None:
-
-        if self.navigation_mode == ExplorationState.TRAVERSAL and self.traversal_path:
-            target = self.traversal_path[-1]
-        else:
-            target = self.current_goal
-        
-        if target is not None:
-            self.get_logger().warning(f"Failed to reach node {target.frontier_id}")
-            self.graph_manager.remove_node(target.frontier_id)
-        
-        self.current_goal = None
-        self.traversal_path = []
-        self.state = ExplorationState.SELECT_GOAL
-
-    # Recovery _________________________________________________________________
-    def trigger_recovery(self) -> None:
-        if self.recovery_future is not None:
-            return # Request already called
-        
-        if not self.recovery_client.service_is_ready():
-            self.get_logger().warn("RecoveryHelper service is not ready")
-            self.recovery_outcome = False
-            return
-        
-        request = RecoveryTrigger.Request()
-        request.complete = False
-
-        self.recovery_future = self.recovery_client.call_async(request)
-        self.recovery_future.add_done_callback(self.recovery_resp_callback)
-        self.recovery_start_time = self.get_clock().now()
-        self.get_logger().info("Recovery node called, awaiting reply...")
-
-    def recovery_resp_callback(self, future) -> None:
-        if future is not self.recovery_future:
-            # Late recovery reply, already timedout
-            return
-
-        try:
-            response = future.result()
-        except Exception as error:
-            self.get_logger().error(f"RecoveryTrigger request failed: {error}")
-            self.recovery_outcome = False
-            self.recovery_future = None
-            return
-        
-        if response is None:
-            self.get_logger().warning("RecoveryTrigger returned no response")
-            self.recovery_outcome = False
-        else:
-            self.get_logger().info(f"Recovery replied: success={response.success}")
-            self.recovery_outcome = response.success
-
-        self.recovery_future = None
-
-    # Completion _______________________________________________________________
-    def notify_completion(self) -> None:
-
-        futures = []
-
-        frontier_future = self.graph_manager.send_end_search()
-        if frontier_future is not None:
-            futures.append(frontier_future)
-        
-        # Recovery node
-        if self.recovery_client.service_is_ready():
-            request = RecoveryTrigger.Request()
-            request.complete = True
-            futures.append(self.recovery_client.call_async(request))
-        else:
-            self.get_logger().warning("RecoveryHelper service not available")
-        
-        self.completion_futures = futures
-        self.completion_start_time = self.get_clock().now()
-    
     def publish_mission_status(self) -> None:
-        self.get_logger().info("Exploration complete")
+        """Report that exploration has finished."""
 
-    # State Machine ____________________________________________________________
+        self.get_logger().info("Exploration complete.")
 
     def step(self) -> None:
         """Run the current stage of the exploration process."""
 
-        match self.state:
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.INITIALISE: # Initialise exploration node
-                if not self.dependencies_available():
+        if self.state == ExplorationState.INITIALISING:
+            if not self.dependencies_available():
+                return
+
+            robot_position = self.get_robot_position()
+
+            if robot_position is None:
+                return
+
+            self.graph_manager.initialise(robot_position)
+
+            self.get_logger().info(
+                f"Graph initialised at ({robot_position[0]:.2f}, "
+                f"{robot_position[1]:.2f})"
+                )
+
+            self.state = ExplorationState.REQUESTING_PLAN
+
+        elif self.state == ExplorationState.REQUESTING_PLAN:
+
+            if self.graph_manager.frontier_future is None:
+                self.graph_manager.request_frontiers()
+
+            else:
+                try:
+                    result = self.graph_manager.process_frontier_response()
+
+                except (RuntimeError, ValueError) as error:
+                    self.get_logger().warning(f"Frontier update failed: {error}")
                     return
-                
-                robot_position = self.get_robot_position()
-                if robot_position is None:
-                    return
-                
-                self.graph_manager.initialise(robot_position)
 
-                self.state = ExplorationState.REQUEST_PLAN
-   
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.REQUEST_PLAN: # Request exploration plan
-                if self.request_plan():
-                    self.state = ExplorationState.SELECT_GOAL
+                if result is not None:
+                    self.get_logger().info(f"Processed {len(result)} frontier(s).")
 
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.SELECT_GOAL: # Select exploration frontier
-                self.select_next()
+                    self.state = ExplorationState.SELECTING_GOAL
 
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.EXPLORATION: # Explore with navigation
-                self.drive_navigation()
+        elif self.state == ExplorationState.SELECTING_GOAL:
 
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.TRAVERSAL: # Traverse graph to new frontier
-                self.drive_navigation()
+            self.current_goal = self.select_next_goal()
 
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.RECOVERY: # Call recovery node
-                if self.recovery_outcome is None:
-                    if self.recovery_future is None:
-                        self.get_logger().info("Calling recovery")
-                        self.trigger_recovery()
-                    else:
-                        elapsed = (self.get_clock().now() - self.recovery_start_time).nanoseconds / 1e9
-                        if elapsed > RECOVERY_TIMEOUT:
-                            self.get_logger().warn("Recovery timed out")
-                            self.recovery_future = None
-                            self.recovery_outcome = False
-                    return
-                
-                outcome = self.recovery_outcome
-                self.recovery_outcome = None
+            if self.current_goal is None:
+                self.state = ExplorationState.COMPLETE
 
-                if outcome:
-                    self.get_logger().info("Recovery success, navigating...")
-                    self.state = self.navigation_mode
-                else:
-                    self.get_logger().warn("Recovery failed, goal abandoned")
-                    self.abandon_goal()
+            else:
+                self.navigation_started = False
+                self.state = ExplorationState.NAVIGATING
 
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            case ExplorationState.COMPLETE: # Mission complete, shutdown
-                if self.mission_complete:
-                    return
-                
-                if not self.completion_requested:
-                    self.notify_completion()
-                    self.completion_requested = True
-                    return
-                
-                elapsed = (self.get_clock().now() - self.completion_start_time).nanoseconds / 1e9
-                acknowledged = all(future.done() for future in self.completion_futures)
+        elif self.state == ExplorationState.NAVIGATING:
+            if not self.navigation_started:
+                self.start_navigation()
+            else:
+                self.nav2_handler.update()
 
-                if acknowledged or elapsed > SHUTDOWN_TIMEOUT:
-                    self.publish_mission_status()
-                    self.mission_complete = True
-                    self.timer.cancel()
-                    rclpy.shutdown()
-                
+        elif self.state == ExplorationState.UPDATING_RECORDS:
+            self.update_records()
+
+            # The map and frontiers may have changed, so generate a fresh MST plan.
+            self.state = ExplorationState.REQUESTING_PLAN
+
+        elif self.state == ExplorationState.COMPLETE:
+            if not self.mission_complete:
+                self.publish_mission_status()
+                self.mission_complete = True
+                self.timer.cancel()
+
 
 def main(args=None) -> None:
     """Start the Exploration Manager node."""

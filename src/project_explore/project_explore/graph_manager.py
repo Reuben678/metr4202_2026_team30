@@ -268,7 +268,10 @@ class GraphManager:
         self.publish_markers()
 
     def remove_node(self, node_id: int) -> bool:
-        
+
+        if node_id not in self.graph:
+            return False
+
         if self.get_node(node_id).visited:
             self.node.get_logger().warning(f"Node {node_id} is visited and cannot be removed")
             return False

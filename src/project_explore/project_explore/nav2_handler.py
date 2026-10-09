@@ -91,17 +91,18 @@ class Nav2Handler:
         goal.pose.orientation.z = math.sin(heading / 2.0)
         goal.pose.orientation.w = math.cos(heading / 2.0)
 
-        self.result_callback = result_callback
-        self.navigation_active = True
-
-        # Start a new timeout for this goal, not when the handler is created.
+        # Changed as navigation_active was set to true before we confirm
+        # if Nav2 accepted the goal
         if not self.navigator.goToPose(goal):
-            self.navigator.get_logger().warning("Navigation goal was rejected")
+            self.navigator.get_logger().warning(
+                "Navigation goal was rejected."
+            )
             return False
-        
+
         self.result_callback = result_callback
         self.navigation_active = True
         self.navigation_start_time = self.navigator.get_clock().now()
+
         return True
 
     def update(self) -> None:
