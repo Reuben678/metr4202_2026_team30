@@ -10,6 +10,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from .graph_manager import Frontier, GraphManager
 from .nav2_handler import NavigationResult, Nav2Handler
 
+from metr4202_interfaces.srv import RecoveryTrigger
+
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
@@ -18,6 +20,7 @@ class ExplorationState(Enum):
     REQUESTING_PLAN = auto()
     SELECTING_GOAL = auto()
     NAVIGATING = auto()
+    RECOVERING = auto()
     UPDATING_RECORDS = auto()
     COMPLETE = auto()
 
@@ -37,6 +40,12 @@ class ExplorationManager(Node):
         # The planner uses this node to request frontiers from Frontier Search.
         self.graph_manager = GraphManager(self)
         self.nav2_handler = Nav2Handler()
+
+        # Client for requesting recovery manoeuvres.
+        self.recovery_client = self.create_client(RecoveryTrigger, "/recovery_node_service")
+
+        # Stores the active recovery request.
+        self.recovery_future = None
 
         self.current_goal: Optional[Frontier] = None
         self.last_navigation_result: Optional[NavigationResult] = None
@@ -105,9 +114,7 @@ class ExplorationManager(Node):
         robot_position = self.get_robot_position()
 
         if robot_position is None:
-            self.get_logger().warning(
-                "Cannot navigate: robot position unavailable."
-            )
+            self.get_logger().warning("Cannot navigate: robot position unavailable.")
             return
 
         self.get_logger().info(
@@ -115,29 +122,64 @@ class ExplorationManager(Node):
             f"({self.current_goal.x:.2f}, {self.current_goal.y:.2f})"
         )
 
-        # Send the goal and current robot position to Nav2 Handler.
-        goal_sent = self.nav2_handler.navigate_to(
-            self.current_goal.x,
-            self.current_goal.y,
-            self.navigation_finished,
-            robot_position=robot_position,
-        )
-
-        if goal_sent:
-            self.navigation_started = True
-            return
-
-        # Handle a rejected navigation goal.
-        self.last_navigation_result = NavigationResult.FAILED
-        self.state = ExplorationState.UPDATING_RECORDS
-
     def navigation_finished(self, result: NavigationResult) -> None:
-        """Receive the final result from Nav2."""
+        """Receive the navigation result and trigger recovery if needed."""
 
         self.last_navigation_result = result
         self.navigation_started = False
-        self.state = ExplorationState.UPDATING_RECORDS
 
+        if result == NavigationResult.SUCCEEDED:
+            self.state = ExplorationState.UPDATING_RECORDS
+
+        else:
+            self.get_logger().warning("Navigation failed. Entering recovery state.")
+            self.state = ExplorationState.RECOVERING
+
+    def request_recovery(self) -> None:
+        """Request a recovery manoeuvre from the Recovery Helper."""
+
+        if self.recovery_future is not None:
+            return
+
+        if not self.recovery_client.service_is_ready():
+            self.get_logger().warning(
+                "Recovery service is not available."
+            )
+            self.state = ExplorationState.UPDATING_RECORDS
+            return
+
+        request = RecoveryTrigger.Request()
+        request.complete = False
+
+        self.recovery_future = self.recovery_client.call_async(request)
+
+        self.get_logger().info("Recovery requested.")
+
+    def process_recovery(self) -> None:
+        """Check whether the recovery manoeuvre has finished."""
+
+        if self.recovery_future is None:
+            self.request_recovery()
+            return
+
+        if not self.recovery_future.done():
+            return
+
+        try:
+            response = self.recovery_future.result()
+
+            if response.success:
+                self.get_logger().info("Recovery manoeuvre succeeded.")
+            else:
+                self.get_logger().warning("Recovery manoeuvre failed.")
+
+        except Exception as error:
+            self.get_logger().error(f"Recovery service failed: {error}")
+
+        finally:
+            self.recovery_future = None
+            self.state = ExplorationState.UPDATING_RECORDS
+    
     def update_records(self) -> None:
         """Update the graph after navigation finishes."""
 
@@ -226,6 +268,9 @@ class ExplorationManager(Node):
             else:
                 self.nav2_handler.update()
 
+        elif self.state == ExplorationState.RECOVERING:
+            self.process_recovery()
+    
         elif self.state == ExplorationState.UPDATING_RECORDS:
             self.update_records()
 
