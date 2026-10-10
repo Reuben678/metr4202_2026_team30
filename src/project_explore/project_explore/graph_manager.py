@@ -299,19 +299,42 @@ class GraphManager:
         return max(candidates, key=lambda frontier: frontier.utility)    
 
     def plan_traversal(self) -> Optional[List[Frontier]]:
- 
-        distances, paths = nx.single_source_dijkstra(self.graph, self.current_node_id, weight="weight")
- 
-        candidates = [node_id for node_id in distances if not self.get_node(node_id).visited]
- 
-        if not candidates:
-            return None
- 
-        target_id = min(candidates, key=lambda node_id: distances[node_id])
- 
-        # Drop the first entry, which is the current node.
-        return [self.get_node(node_id) for node_id in paths[target_id][1:]]
+        """Find the shortest route to an unvisited frontier through visited nodes."""
 
+        # Only allow visited nodes for intermediate traversal.
+        visited_nodes = [node_id for node_id in self.graph.nodes 
+                         if self.get_node(node_id).visited]
+
+        # Construct a temporary graph containing visited nodes.
+        visited_graph = self.graph.subgraph(visited_nodes)
+
+        # Find shortest distances through previously visited nodes.
+        distances, paths = nx.single_source_dijkstra(visited_graph, self.current_node_id, weight="weight")
+
+        best_target = None
+        best_path = None
+        best_distance = float("inf")
+
+        # Find unvisited frontiers connected to the visited graph.
+        for node_id in distances:
+
+            for neighbor_id in self.graph.neighbors(node_id):
+
+                if self.get_node(neighbor_id).visited:
+                    continue
+
+                total_distance = (distances[node_id] + self.graph[node_id][neighbor_id]["weight"])
+
+                if total_distance < best_distance:
+                    best_distance = total_distance
+                    best_target = neighbor_id
+                    best_path = paths[node_id] + [neighbor_id]
+
+        if best_target is None:
+            return None
+
+        # Exclude the robot's current node.
+        return [self.get_node(node_id) for node_id in best_path[1:]]
 
 
 
