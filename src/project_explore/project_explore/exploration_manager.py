@@ -19,7 +19,8 @@ class ExplorationState(Enum):
     INITIALISING = auto()
     REQUESTING_PLAN = auto()
     SELECTING_GOAL = auto()
-    NAVIGATING = auto()
+    EXPLORING = auto()
+    TRAVERSING = auto()
     RECOVERING = auto()
     UPDATING_RECORDS = auto()
     COMPLETE = auto()
@@ -36,6 +37,9 @@ class ExplorationManager(Node):
         # Used to find the robot's current position on the generated map.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # Retains selected traversal route
+        self.traversal_route: List[Frontier] = []
 
         # The planner uses this node to request frontiers from Frontier Search.
         self.graph_manager = GraphManager(self)
@@ -81,27 +85,73 @@ class ExplorationManager(Node):
         translation = transform.transform.translation
         return translation.x, translation.y
 
-    def select_next_goal(self) -> Optional[Frontier]:
-        """Choose the next graph node to navigate towards."""
+    def select_next_goal(self) -> None:
+        """Select local exploration or a graph traversal route."""
 
-        # First, prioritise unvisited neighbouring frontiers.
+        # Clear any previous completed traversal.
+        self.traversal_route = []
+        self.traversal_target = None
+
+        # First preference: explore an unvisited neighbour.
         frontier = self.graph_manager.select_goal()
 
         if frontier is not None:
-            self.get_logger().info(f"Selected neighbouring frontier {frontier.frontier_id}")
-            return frontier
+            self.current_goal = frontier
+            self.state = ExplorationState.EXPLORING
 
-        # Otherwise, find the shortest route to an unvisited frontier.
+            self.get_logger().info(
+                f"Exploring neighbouring frontier "
+                f"{frontier.frontier_id}"
+            )
+            return
+
+        # No local frontier: use Dijkstra to find another area.
         route = self.graph_manager.plan_traversal()
 
-        if route:
-            next_node = route[0]
+        if not route:
+            self.current_goal = None
+            self.state = ExplorationState.COMPLETE
+            return
 
-            self.get_logger().info(f"Dijkstra selected graph node {next_node.frontier_id}")
+        # The last node is the unexplored destination.
+        self.traversal_target = route[-1]
 
-            return next_node
+        # All preceding nodes must already be visited.
+        intermediate_nodes = route[:-1]
 
-        return None
+        # Until GraphManager is updated in Step 2 of the
+        # wider plan, do not traverse an unvisited node
+        # while pretending it is a known transit waypoint.
+        if any(not node.visited for node in intermediate_nodes):
+            self.get_logger().warning(
+                "Dijkstra route contains unvisited intermediate "
+                "nodes. Replanning as local exploration."
+            )
+
+            self.current_goal = route[0]
+            self.traversal_target = None
+            self.state = ExplorationState.EXPLORING
+            return
+
+        if not intermediate_nodes:
+            # Destination is directly reachable in the graph.
+            self.current_goal = self.traversal_target
+            self.traversal_target = None
+            self.state = ExplorationState.EXPLORING
+            return
+
+        # Store the route rather than recalculating after
+        # every successful traversal waypoint.
+        self.traversal_route = list(intermediate_nodes)
+        self.current_goal = None
+
+        self.get_logger().info(
+            f"Traversal planned through "
+            f"{len(self.traversal_route)} visited node(s) "
+            f"towards frontier {self.traversal_target.frontier_id}."
+        )
+
+        self.state = ExplorationState.TRAVERSING
 
     def start_navigation(self) -> None:
         """Send the selected frontier to Nav2."""
@@ -121,6 +171,24 @@ class ExplorationManager(Node):
             f"Sending frontier {self.current_goal.frontier_id}: "
             f"({self.current_goal.x:.2f}, {self.current_goal.y:.2f})"
         )
+
+        # Record whether we are exploring or traversing.
+        self.navigation_mode = self.state
+
+        goal_sent = self.nav2_handler.navigate_to(
+            self.current_goal.x,
+            self.current_goal.y,
+            self.navigation_finished,
+            robot_position=robot_position,
+        )
+
+        if goal_sent:
+            self.navigation_started = True
+            return
+
+        # Rejected goals do not trigger physical recovery.
+        self.last_navigation_result = NavigationResult.FAILED
+        self.state = ExplorationState.UPDATING_RECORDS
 
     def navigation_finished(self, result: NavigationResult) -> None:
         """Receive the navigation result and trigger recovery if needed."""
@@ -181,31 +249,56 @@ class ExplorationManager(Node):
             self.state = ExplorationState.UPDATING_RECORDS
     
     def update_records(self) -> None:
-        """Update the graph after navigation finishes."""
+        """Update the graph and determine the next state."""
 
         if self.current_goal is None:
+            self.state = ExplorationState.REQUESTING_PLAN
             return
 
         node_id = self.current_goal.frontier_id
+        succeeded = (self.last_navigation_result == NavigationResult.SUCCEEDED)
 
-        if self.last_navigation_result == NavigationResult.SUCCEEDED:
+        previous_mode = self.navigation_mode
 
+        if succeeded:
             self.graph_manager.mark_reached(node_id)
-
-            self.get_logger().info(
-                f"Reached graph node {node_id}."
-            )
-
+            self.get_logger().info(f"Reached graph node {node_id}.")
         else:
-            self.graph_manager.remove_node(node_id)
+            removed = self.graph_manager.remove_node(node_id)
 
-            self.get_logger().warning(
-                f"Failed to reach graph node {node_id}."
-            )
+            if not removed:
+                self.get_logger().warning(f"Could not remove failed node {node_id}.")
+
+            self.get_logger().warning(f"Failed to reach graph node {node_id}.")
 
         self.current_goal = None
         self.last_navigation_result = None
         self.navigation_started = False
+        self.navigation_mode = None
+
+        if not succeeded:
+            # The current route cannot be trusted after failure.
+            self.traversal_route = []
+            self.traversal_target = None
+            self.state = ExplorationState.REQUESTING_PLAN
+            return
+
+        if previous_mode == ExplorationState.TRAVERSING:
+            # Continue the stored traversal route.
+            if self.traversal_route:
+                self.state = ExplorationState.TRAVERSING
+                return
+
+            # Arrived at the last visited transit node.
+            # Now explore the destination frontier.
+            if self.traversal_target is not None:
+                self.current_goal = self.traversal_target
+                self.traversal_target = None
+                self.state = ExplorationState.EXPLORING
+                return
+
+        # Exploration waypoint reached: obtain fresh frontiers.
+        self.state = ExplorationState.REQUESTING_PLAN
 
     def publish_mission_status(self) -> None:
         """Report that exploration has finished."""
@@ -252,17 +345,31 @@ class ExplorationManager(Node):
                     self.state = ExplorationState.SELECTING_GOAL
 
         elif self.state == ExplorationState.SELECTING_GOAL:
+            self.select_next_goal()
 
-            self.current_goal = self.select_next_goal()
+        elif self.state == ExplorationState.EXPLORING:
 
-            if self.current_goal is None:
-                self.state = ExplorationState.COMPLETE
-
+            if not self.navigation_started:
+                self.start_navigation()
             else:
-                self.navigation_started = False
-                self.state = ExplorationState.NAVIGATING
+                self.nav2_handler.update()
 
-        elif self.state == ExplorationState.NAVIGATING:
+        elif self.state == ExplorationState.TRAVERSING:
+
+            # Choose the next waypoint from the stored route.
+            if self.current_goal is None:
+                if self.traversal_route:
+                    self.current_goal = self.traversal_route.pop(0)
+
+                    self.get_logger().info(
+                        f"Traversing to visited node "
+                        f"{self.current_goal.frontier_id}."
+                    )
+                else:
+                    # Defensive fallback.
+                    self.state = ExplorationState.REQUESTING_PLAN
+                    return
+
             if not self.navigation_started:
                 self.start_navigation()
             else:
@@ -273,9 +380,6 @@ class ExplorationManager(Node):
     
         elif self.state == ExplorationState.UPDATING_RECORDS:
             self.update_records()
-
-            # The map and frontiers may have changed, so generate a fresh MST plan.
-            self.state = ExplorationState.REQUESTING_PLAN
 
         elif self.state == ExplorationState.COMPLETE:
             if not self.mission_complete:
