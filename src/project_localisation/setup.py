@@ -13,7 +13,7 @@ setup(
         ('share/ament_index/resource_index/packages',
          ['resource/' + package_name]),
         ('share/' + package_name,
-         ['package.xml', 'LICENCE',
+         ['package.xml', 'LICENSE',
     ])
     ],
     install_requires=['setuptools'],
@@ -30,7 +30,7 @@ setup(
     entry_points={
         'console_scripts':[
             'localizer = project_localisation.target_localisation:localizer_main',
-            'evaluate = project_localisation.evaluate:evaluate_main'
+
         ]
     }
 
