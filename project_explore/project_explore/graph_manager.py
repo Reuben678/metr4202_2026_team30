@@ -133,6 +133,31 @@ class GraphManager:
 
         self.marker_pub.publish(marker)
 
+    def remove_stale_frontiers(self, latest_frontiers: List[Frontier]) -> None:
+        """Remove unvisited/outdated graph nodes from the latest frontier results."""
+
+        stale_node_ids = []
+
+        for node_id in list(self.graph.nodes):
+
+            node = self.get_node(node_id)
+
+            # Retain visited nodes for back traversal
+            if node.visited:
+                continue
+
+            # Check whether the node corresponds to a current frontier
+            still_valid = any(hypot(node.x - frontier.x, node.y - frontier.y) <= MERGE_TOLERANCE for frontier in latest_frontiers)
+
+            if not still_valid:
+                stale_node_ids.append(node_id)
+
+        for node_id in stale_node_ids:
+            self.graph.remove_node(node_id)
+
+        if stale_node_ids:
+            self.node.get_logger().info(f"Removed {len(stale_node_ids)} outdated frontier nodes.")
+
     def request_frontiers(self) -> bool:
         if self.frontier_future is not None:
             return True
@@ -159,17 +184,28 @@ class GraphManager:
         except Exception as error:
             raise RuntimeError(f"GetFrontiers request failed: {error}")
         
-        frontiers=self.parse_frontier_response(response)
+        frontiers = self.parse_frontier_response(response)
 
+############# Added to remove outdated unvisited frontiers  ################
+        self.remove_stale_frontiers(frontiers)
+
+        # Add or update valid frontiers
         node_ids = []
+
         for frontier in frontiers:
             node_id = self.add_frontier(frontier)
             if node_id is not None:
                 node_ids.append(node_id)
 
+        self.node.get_logger().info(
+            f"Graph status: {self.graph.number_of_nodes()} total nodes, "
+            f"{sum(not self.get_node(n).visited for n in self.graph.nodes)} "
+            f"unvisited frontiers remaining."
+        )
+        
         self.publish_markers()
         return node_ids
-
+    
     def send_end_search(self):
 
         if not self.frontier_client.service_is_ready():

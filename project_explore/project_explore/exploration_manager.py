@@ -12,6 +12,7 @@ from .nav2_handler import NavigationResult, Nav2Handler
 
 from metr4202_interfaces.srv import RecoveryTrigger
 
+COMPLETION_THRESHOLD = 3
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
@@ -58,6 +59,9 @@ class ExplorationManager(Node):
         self.mission_complete = False
         self.dependencies_initialised = False
 
+        # Number of consecutive frontier updates with no valid goals
+        self.empty_frontier_count = 0
+
         self.timer = self.create_timer(0.10, self.step)
         self.get_logger().info("Exploration Manager initialised.")
 
@@ -96,6 +100,9 @@ class ExplorationManager(Node):
         frontier = self.graph_manager.select_goal()
 
         if frontier is not None:
+            #valid exp goal has been found
+            self.empty_frontier_count = 0 
+
             self.current_goal = frontier
             self.state = ExplorationState.EXPLORING
 
@@ -109,8 +116,27 @@ class ExplorationManager(Node):
         route = self.graph_manager.plan_traversal()
 
         if not route:
+
+            #no valid frontier remains in the graph
+            self.empty_frontier_count += 1
+            self.get_logger().info(
+                f"No valid exploration goals found. "
+                f"Completion check "
+                f"{self.empty_frontier_count}/{COMPLETION_THRESHOLD}"
+            )
+
             self.current_goal = None
-            self.state = ExplorationState.COMPLETE
+
+            if self.empty_frontier_count >= COMPLETION_THRESHOLD:
+
+                self.get_logger().info("Exploration completion confirmed.")
+
+                self.state = ExplorationState.COMPLETE
+
+            else:
+                # Request fresh frontiers before confirming completion.
+                self.state = ExplorationState.REQUESTING_PLAN
+
             return
 
         # The last node is the unexplored destination.
@@ -175,6 +201,13 @@ class ExplorationManager(Node):
         # Record whether we are exploring or traversing.
         self.navigation_mode = self.state
 
+        # For debugging
+        self.get_logger().info(
+            f"Navigation mode: {self.state.name} | "
+            f"Target node: {self.current_goal.frontier_id} | "
+            f"Previously visited: {self.current_goal.visited}"
+        )
+        
         goal_sent = self.nav2_handler.navigate_to(
             self.current_goal.x,
             self.current_goal.y,
