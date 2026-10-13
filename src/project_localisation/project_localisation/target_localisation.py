@@ -315,7 +315,17 @@ class Localizer(Node):
                      marker_size=self.size, dictionary=self.dictionary_name)
         if ros_output:
             self.status.publish(String(data=json.dumps(state, allow_nan=False)))
-            self.markers.publish(array)
+            #self.markers.publish(array)
+            marker_output_json = json.dumps({
+                "id": marker.id,
+                "pos_x": marker.pose.position.x,
+                "pos_y": marker.pose.position.y,
+                "time": {
+                    "sec": state.stamp.sec,
+                    "nanosec": state.stamp.nanosec
+                }
+            })
+            self.markers.publish(marker_output_json)
         save(self.output / 'targets.json', state)
         self.log_file.flush()
 
@@ -326,7 +336,6 @@ class Localizer(Node):
             finally:
                 self.log_file.close()
         return super().destroy_node()
-
 
 def localizer_main(args=None):
     rclpy.init(args=args)
@@ -341,7 +350,6 @@ def localizer_main(args=None):
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == '__main__':
     localizer_main()

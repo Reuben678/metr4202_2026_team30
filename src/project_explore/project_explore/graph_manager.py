@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from math import hypot
 from typing import List, Optional, Tuple
+import json
+
+from std_msgs.msg import String
 
 import networkx as nx
 from metr4202_interfaces.srv import GetFrontiers
@@ -60,6 +63,18 @@ class GraphManager:
  
         # Increasing ID handed to each new frontier node
         self.next_node_id = self.START_NODE_ID + 1
+
+        # ArUco Integration
+        # Store detected ArUco landmarks, keyed by marker ID.
+        self.marker_nodes = {}
+
+        # Subscribe to target localisation JSON.
+        self.marker_subscription = self.node.create_subscription(
+            String,
+            "/targets/markers",
+            self.marker_callback,
+            10,
+        )
  
     def initialise(self, robot_position: Position):
         start = Frontier(
@@ -336,6 +351,58 @@ class GraphManager:
         # Exclude the robot's current node.
         return [self.get_node(node_id) for node_id in best_path[1:]]
 
+    def marker_callback(self, msg: String) -> None:
+        """Create a landmark entry when a new ArUco ID is detected."""
 
+        try:
+            data = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError) as error:
+            self.node.get_logger().warning(
+                f"Invalid marker JSON: {error}"
+            )
+            return
 
+        if not isinstance(data, dict):
+            return
 
+        try:
+            marker_id = int(data["id"])
+            x = float(data["pos_x"])
+            y = float(data["pos_y"])
+
+            timestamp = data["time"]
+            time_sec = int(timestamp["sec"])
+            time_nanosec = int(timestamp["nanosec"])
+
+            if not all(math.isfinite(v) for v in (x, y)):
+                return
+
+        except (KeyError, TypeError, ValueError, OverflowError):
+            self.node.get_logger().warning(
+                "Marker JSON is missing valid id, pos_x, pos_y, or time fields."
+            )
+            return
+
+        # Only create an entry the first time this ID is detected.
+        if marker_id in self.marker_nodes:
+            return
+
+        self.marker_nodes[len(self.marker_nodes)-1] = {
+            "id": marker_id,
+            "x": x,
+            "y": y,
+            "time": {
+                "sec": time_sec,
+                "nanosec": time_nanosec,
+            },
+        }
+
+        self.node.get_logger().info(
+            f"New ArUco marker {marker_id} at "
+            f"x={x:.2f}, y={y:.2f}, "
+            f"time={time_sec}.{time_nanosec:09d}"
+        )
+
+    def get_marker_node(self, marker_id: int):
+        """Get a stored landmark by ID, or None if it is unknown."""
+        return self.marker_nodes.get(marker_id)
