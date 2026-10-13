@@ -28,9 +28,9 @@ from scipy import ndimage
 
 FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 
-MIN_FRONTIER_SIZE = 3   # Min size of frontier allowable 
-MIN_FRONTIER_DIST = 0.15  # Minimum dist for valid frontiers
-MAX_FRONTIER_DIST = 3  # Max distance considered
+MIN_FRONTIER_SIZE = 3       # Min size of frontier allowable 
+MIN_FRONTIER_DIST = 0.15    # Minimum dist for valid frontiers
+MAX_FRONTIER_DIST = 3       # Max distance considered
 
 MAP_FRAME = "map"
 ROBOT_FRAME = "base_link"
@@ -278,9 +278,8 @@ class FrontierSearch(Node):
                 continue
  
             # Keep only local frontiers
-            if not (MIN_FRONTIER_DIST <= path_distance <= MAX_FRONTIER_DIST):
+            if not (MIN_FRONTIER_DIST <= path_distance):
                 continue
- 
             utility = self.w_info * size - self.w_cost * path_distance
  
             clusters.append({
