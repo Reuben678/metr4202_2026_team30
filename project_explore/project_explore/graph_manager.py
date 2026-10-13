@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from math import hypot
+import math
 from typing import List, Optional, Tuple
 import json
 
@@ -18,7 +19,8 @@ Position = Tuple[float, float]
 
 FRONTIER_COLS = 6       # Expected columns in frontier msg
 
-MERGE_TOLERANCE = 1.0   # Allowable tolerance between frontier nodes [m]
+MERGE_TOLERANCE = 0.75  # Allowable tolerance between frontier nodes [m]
+VISITED_TOLERANCE = 0.25    # Suppress frontiers near visited waypoints [m]
 
 UNASSIGNED_ID = -1      # Place holder
 
@@ -141,7 +143,10 @@ class GraphManager:
         for node_id in list(self.graph.nodes):
 
             node = self.get_node(node_id)
-
+            self.node.get_logger().info(
+                f"Removing stale frontier {node_id} "
+                f"at ({node.x:.2f}, {node.y:.2f})"
+            )
             # Retain visited nodes for back traversal
             if node.visited:
                 continue
@@ -185,7 +190,18 @@ class GraphManager:
             raise RuntimeError(f"GetFrontiers request failed: {error}")
         
         frontiers = self.parse_frontier_response(response)
+        self.node.get_logger().info(
+            f"Frontier Search returned {len(frontiers)} candidates:"
+        )
 
+        for frontier in frontiers:
+            self.node.get_logger().info(
+                f"Candidate: x={frontier.x:.2f}, "
+                f"y={frontier.y:.2f}, "
+                f"utility={frontier.utility:.3f}, "
+                f"path_distance={frontier.path_distance:.2f}"
+            )
+            
 ############# Added to remove outdated unvisited frontiers  ################
         self.remove_stale_frontiers(frontiers)
 
@@ -265,7 +281,8 @@ class GraphManager:
     def find_nearby_node(self, position: Position, visited: bool) -> Optional[int]:
  
         best_id = None
-        min_proximity = MERGE_TOLERANCE
+        tolerance = (VISITED_TOLERANCE if visited else MERGE_TOLERANCE )
+        min_proximity = tolerance
  
         for node_id in self.graph.nodes:
             node = self.get_node(node_id)
@@ -284,7 +301,16 @@ class GraphManager:
     def add_frontier(self, frontier: Frontier) -> Optional[int]:
     
             # Already been here: discard, otherwise the robot would revisit it.
-            if self.find_nearby_node(frontier.position, visited=True) is not None:
+            visited_id = self.find_nearby_node(
+                frontier.position,
+                visited=True
+            )
+
+            if visited_id is not None:
+                self.node.get_logger().info(
+                    f"Rejecting frontier at ({frontier.x:.2f}, {frontier.y:.2f}): "
+                    f"within {VISITED_TOLERANCE:.2f} m of visited node {visited_id}"
+                )
                 return None
     
             existing_id = self.find_nearby_node(frontier.position, visited=False)
@@ -302,6 +328,11 @@ class GraphManager:
     
                 self.graph.remove_edges_from(list(self.graph.edges(existing_id)))
                 node_id = existing_id
+                #debugging
+                self.node.get_logger().info(
+                    f"Merging frontier at ({frontier.x:.2f}, {frontier.y:.2f}) "
+                    f"with unvisited node {existing_id}"
+                )
             else:
                 node_id = self.next_node_id
                 self.next_node_id += 1
