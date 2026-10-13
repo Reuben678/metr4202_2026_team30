@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from math import hypot
+import math
 from typing import List, Optional, Tuple
 import json
 
@@ -18,7 +19,8 @@ Position = Tuple[float, float]
 
 FRONTIER_COLS = 6       # Expected columns in frontier msg
 
-MERGE_TOLERANCE = 1.0   # Allowable tolerance between frontier nodes [m]
+MERGE_TOLERANCE = 0.75  # Allowable tolerance between frontier nodes [m]
+VISITED_TOLERANCE = 0.25    # Suppress frontiers near visited waypoints [m]
 
 UNASSIGNED_ID = -1      # Place holder
 
@@ -133,6 +135,34 @@ class GraphManager:
 
         self.marker_pub.publish(marker)
 
+    def remove_stale_frontiers(self, latest_frontiers: List[Frontier]) -> None:
+        """Remove unvisited/outdated graph nodes from the latest frontier results."""
+
+        stale_node_ids = []
+
+        for node_id in list(self.graph.nodes):
+
+            node = self.get_node(node_id)
+            self.node.get_logger().info(
+                f"Removing stale frontier {node_id} "
+                f"at ({node.x:.2f}, {node.y:.2f})"
+            )
+            # Retain visited nodes for back traversal
+            if node.visited:
+                continue
+
+            # Check whether the node corresponds to a current frontier
+            still_valid = any(hypot(node.x - frontier.x, node.y - frontier.y) <= MERGE_TOLERANCE for frontier in latest_frontiers)
+
+            if not still_valid:
+                stale_node_ids.append(node_id)
+
+        for node_id in stale_node_ids:
+            self.graph.remove_node(node_id)
+
+        if stale_node_ids:
+            self.node.get_logger().info(f"Removed {len(stale_node_ids)} outdated frontier nodes.")
+
     def request_frontiers(self) -> bool:
         if self.frontier_future is not None:
             return True
@@ -159,17 +189,39 @@ class GraphManager:
         except Exception as error:
             raise RuntimeError(f"GetFrontiers request failed: {error}")
         
-        frontiers=self.parse_frontier_response(response)
+        frontiers = self.parse_frontier_response(response)
+        self.node.get_logger().info(
+            f"Frontier Search returned {len(frontiers)} candidates:"
+        )
 
+        for frontier in frontiers:
+            self.node.get_logger().info(
+                f"Candidate: x={frontier.x:.2f}, "
+                f"y={frontier.y:.2f}, "
+                f"utility={frontier.utility:.3f}, "
+                f"path_distance={frontier.path_distance:.2f}"
+            )
+            
+############# Added to remove outdated unvisited frontiers  ################
+        self.remove_stale_frontiers(frontiers)
+
+        # Add or update valid frontiers
         node_ids = []
+
         for frontier in frontiers:
             node_id = self.add_frontier(frontier)
             if node_id is not None:
                 node_ids.append(node_id)
 
+        self.node.get_logger().info(
+            f"Graph status: {self.graph.number_of_nodes()} total nodes, "
+            f"{sum(not self.get_node(n).visited for n in self.graph.nodes)} "
+            f"unvisited frontiers remaining."
+        )
+        
         self.publish_markers()
         return node_ids
-
+    
     def send_end_search(self):
 
         if not self.frontier_client.service_is_ready():
@@ -229,7 +281,8 @@ class GraphManager:
     def find_nearby_node(self, position: Position, visited: bool) -> Optional[int]:
  
         best_id = None
-        min_proximity = MERGE_TOLERANCE
+        tolerance = (VISITED_TOLERANCE if visited else MERGE_TOLERANCE )
+        min_proximity = tolerance
  
         for node_id in self.graph.nodes:
             node = self.get_node(node_id)
@@ -248,7 +301,16 @@ class GraphManager:
     def add_frontier(self, frontier: Frontier) -> Optional[int]:
     
             # Already been here: discard, otherwise the robot would revisit it.
-            if self.find_nearby_node(frontier.position, visited=True) is not None:
+            visited_id = self.find_nearby_node(
+                frontier.position,
+                visited=True
+            )
+
+            if visited_id is not None:
+                self.node.get_logger().info(
+                    f"Rejecting frontier at ({frontier.x:.2f}, {frontier.y:.2f}): "
+                    f"within {VISITED_TOLERANCE:.2f} m of visited node {visited_id}"
+                )
                 return None
     
             existing_id = self.find_nearby_node(frontier.position, visited=False)
@@ -266,6 +328,11 @@ class GraphManager:
     
                 self.graph.remove_edges_from(list(self.graph.edges(existing_id)))
                 node_id = existing_id
+                #debugging
+                self.node.get_logger().info(
+                    f"Merging frontier at ({frontier.x:.2f}, {frontier.y:.2f}) "
+                    f"with unvisited node {existing_id}"
+                )
             else:
                 node_id = self.next_node_id
                 self.next_node_id += 1
