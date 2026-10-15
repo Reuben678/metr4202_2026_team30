@@ -216,27 +216,6 @@ def generate_launch_description():
     )
 
     # ---------------------------------------------------------
-    # ArUco Marker Detection
-    # ---------------------------------------------------------
-
-    aruco_detector = TimerAction(
-        period=18.0,
-        actions=[
-            Node(
-                package="project_aruco",
-                executable="aruco_detector",
-                name="aruco_detector",
-                output="screen",
-                parameters=[{
-                    "use_sim_time": use_sim_time,
-                    "image_topic": "/camera/image_raw",
-                    "marker_size": 0.10,
-                }],
-            )
-        ],
-    )
-
-    # ---------------------------------------------------------
     # ArUco Target Localisation
     # ---------------------------------------------------------
 
@@ -278,6 +257,5 @@ def generate_launch_description():
             exploration_manager,
             recovery_helper,
             target_localizer,
-            aruco_detector,
-        ]
-    )
+	]
+)
