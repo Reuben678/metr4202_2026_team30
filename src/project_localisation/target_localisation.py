@@ -105,7 +105,7 @@ class Localizer(Node):
                               'reprojection', 'range_m', 'view_angle_deg'])
 
         self.status = self.create_publisher(String, '/targets/state', LATCH)
-        self.markers = self.create_publisher(MarkerArray, '/targets/markers', LATCH)
+        self.markers = self.create_publisher(String, '/targets/markers', LATCH)
         self.create_subscription(
             Int32, parameter(self, 'id_topic', '/aruco/detected_id'), self.on_id, 20)
         self.create_subscription(
@@ -152,52 +152,104 @@ class Localizer(Node):
         self.last_clock = now
         return now
 
+    
     def on_image(self, msg):
+        # Use the local ROS clock at image arrival for freshness and timing.
+        # Keep the original image stamp for timestamped TF lookups.
         now = self.check_clock()
-        stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
-        if stamp_ns <= 0 or not -0.05 <= now - stamp_ns * 1e-9 <= self.max_age:
-            self.warn('Image time is invalid or stale; check use_sim_time')
+        stamp_ns = (
+            msg.header.stamp.sec * 10**9
+            + msg.header.stamp.nanosec
+        )
+
+        if stamp_ns <= 0:
+            self.warn('Image has an invalid zero timestamp')
             return
+
+        # Keep rejecting duplicate or out-of-order camera frames.
         if stamp_ns <= self.last_image_ns:
             return
+
         if self.info is None:
             self.warn('Waiting for CameraInfo')
             return
+
         try:
             info = self.info
-            if (not msg.header.frame_id or msg.header.frame_id != info.header.frame_id
-                    or msg.width != info.width or msg.height != info.height
-                    or info.distortion_model not in ('', 'plumb_bob', 'rational_polynomial')
-                    or info.binning_x > 1 or info.binning_y > 1
-                    or info.roi.x_offset or info.roi.y_offset):
-                raise ValueError('Use matching raw Image and full-resolution CameraInfo')
-            K, D = np.asarray(info.k).reshape(3, 3), np.asarray(info.d)
-            if not np.isfinite(K).all() or not np.isfinite(D).all() or min(K[0, 0], K[1, 1]) <= 0:
+            if (not msg.header.frame_id
+                    or msg.header.frame_id != info.header.frame_id
+                    or msg.width != info.width
+                    or msg.height != info.height
+                    or info.distortion_model not in (
+                        '', 'plumb_bob', 'rational_polynomial'
+                    )
+                    or info.binning_x > 1
+                    or info.binning_y > 1
+                    or info.roi.x_offset
+                    or info.roi.y_offset):
+                raise ValueError(
+                    'Use matching raw Image and full-resolution CameraInfo'
+                )
+
+            K = np.asarray(info.k).reshape(3, 3)
+            D = np.asarray(info.d)
+
+            if (not np.isfinite(K).all()
+                    or not np.isfinite(D).all()
+                    or min(K[0, 0], K[1, 1]) <= 0):
                 raise ValueError('Invalid camera calibration')
-            self.raw_time = stamp_ns * 1e-9
-            if self.last_image_ns >= 0 and stamp_ns - self.last_image_ns < 100_000_000:
+
+            # Track camera freshness using arrival time, not the header stamp.
+            self.raw_time = now
+
+            # Limit processing rate to about 10 FPS using camera timestamps.
+            if (self.last_image_ns >= 0
+                    and stamp_ns - self.last_image_ns < 100_000_000):
                 return
+
             self.last_image_ns = stamp_ns
-            gray = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+
+            gray = self.bridge.imgmsg_to_cv2(
+                msg, desired_encoding='mono8'
+            )
+
             if self.detector is not None:
                 corners, ids, _ = self.detector.detectMarkers(gray)
             else:
                 corners, ids, _ = cv2.aruco.detectMarkers(
-                    gray, self.dictionary, parameters=self.detector_parameters)
+                    gray,
+                    self.dictionary,
+                    parameters=self.detector_parameters,
+                )
+
             if ids is None:
                 return
+
             flat_ids = ids.reshape(-1).tolist()
             items = []
+
             for mid, corner in zip(flat_ids, corners):
                 if flat_ids.count(mid) != 1:
                     continue
-                pose = estimate(corner, self.size, K, D, msg.width, msg.height,
-                                self.min_side, self.max_range, self.error_limit)
+
+                pose = estimate(
+                    corner, self.size, K, D,
+                    msg.width, msg.height,
+                    self.min_side, self.max_range,
+                    self.error_limit,
+                )
+
                 if pose is not None:
                     items.append(dict(id=int(mid), **pose))
+
             if items:
-                self.queue.append(dict(stamp_ns=stamp_ns, frame=msg.header.frame_id,
-                                       items=items))
+                self.queue.append({
+                    'stamp_ns': stamp_ns,
+                    'received_s': now,
+                    'frame': msg.header.frame_id,
+                    'items': items,
+                })
+
         except (ValueError, TypeError, CvBridgeError, cv2.error) as error:
             self.warn(str(error))
 
@@ -238,7 +290,10 @@ class Localizer(Node):
 
         for _ in range(len(self.queue)):
             data = self.queue.popleft()
-            t = data['stamp_ns'] * 1e-9
+
+            # Use local arrival time for freshness and observation timing.
+            t = data['received_s']
+
             if not -0.05 <= now - t <= self.max_age:
                 if self.require_announced_ids and any(
                         x['id'] not in self.announced_ids for x in data['items']):
@@ -315,9 +370,26 @@ class Localizer(Node):
                      marker_size=self.size, dictionary=self.dictionary_name)
         if ros_output:
             self.status.publish(String(data=json.dumps(state, allow_nan=False)))
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
             self.markers.publish(array)
+=======
+
+            marker_output_json = json.dumps({
+                "targets": [
+                    {
+                        "id": mid,
+                        "xyz": result["xyz"]
+                    }
+                    for mid, result in sorted(self.records.items())
+                ]
+            }, allow_nan=False)
+
+            self.markers.publish(String(data=marker_output_json))
+
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
         save(self.output / 'targets.json', state)
         self.log_file.flush()
+
 
     def destroy_node(self):
         if hasattr(self, 'log_file') and not self.log_file.closed:
