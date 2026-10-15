@@ -29,5 +29,5 @@ LAUNCH_ARGS+=("$@")
 MY_NODES="exploration_manager|frontier_search|util_weights"
 
 echo "Launching exploration system"
-ros2 launch src/autonomous_exploration.launch.py "${LAUNCH_ARGS[@]}" 2>&1 \
+ros2 launch project_explore/launch/autonomous_exploration.launch.py "${LAUNCH_ARGS[@]}" 2>&1 \
   | grep --line-buffered -E "^\[(${MY_NODES})-[0-9]+\]"

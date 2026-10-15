@@ -4,10 +4,8 @@ cd ~/METR4202/metr4202_2026_team30
 rm -rf /install /build /log
 
 # Rebuild
-cd src/
-colcon build --packages-select metr4202_interfaces project_explore project_search
+colcon build --packages-select metr4202_interfaces project_explore project_search project_localisation
 
 source install/setup.bash
 # Ready to run
-cd ..
 echo "Rebuild done"
