@@ -42,7 +42,7 @@ class Nav2Handler:
         self.navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
 
         self.navigation_start_time = None
-        self.navigation_timeout = 45.0
+        self.navigation_timeout = 90.0
         self.navigation_active = False
         self.result_callback: Optional[Callable[[NavigationResult], None]] = None
 
