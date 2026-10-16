@@ -12,6 +12,8 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
+from visualization_msgs.msg import MarkerArray
+from std_msgs.msg import ColorRGBA
 
 NODE_MARKER_SIZE = 0.05     # [m] one map cell
 
@@ -19,10 +21,13 @@ Position = Tuple[float, float]
 
 FRONTIER_COLS = 6       # Expected columns in frontier msg
 
-MERGE_TOLERANCE = 0.75  # Allowable tolerance between frontier nodes [m]
-VISITED_TOLERANCE = 0.25    # Suppress frontiers near visited waypoints [m]
+MERGE_TOLERANCE = 0.8  # Allowable tolerance between frontier nodes [m]
+VISITED_TOLERANCE = 0.5    # Suppress frontiers near visited waypoints [m]
 
 UNASSIGNED_ID = -1      # Place holder
+
+VISITED_COLOUR = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+UNVISITED_COLOUR = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 
 @dataclass
 class Frontier:
@@ -45,7 +50,7 @@ class GraphManager:
 
     def __init__(self, node: Node) -> None:
         self.node = node
- 
+
         # RViz display of the graph nodes
         self.marker_pub = self.node.create_publisher(Marker, "graph_nodes", 10)
 
@@ -68,13 +73,13 @@ class GraphManager:
 
         # ArUco Integration
         # Store detected ArUco landmarks, keyed by marker ID.
-        self.marker_nodes = {}
+        self.aruco_nodes = {}
 
-        # Subscribe to target localisation JSON.
-        self.marker_subscription = self.node.create_subscription(
+        # Subscribe to ArUco markers
+        self.aruco_subscription = self.node.create_subscription(
             String,
-            "/targets/markers",
-            self.marker_callback,
+            "/targets/aruco",
+            self.aruco_callback,
             10,
         )
  
@@ -117,21 +122,15 @@ class GraphManager:
         marker.scale.x = NODE_MARKER_SIZE
         marker.scale.y = NODE_MARKER_SIZE
         marker.scale.z = 0.02      # Flat, sitting just above the map
+        marker.color.a = 1.0
 
-        for node_id in self.graph.nodes:
+        for node_id in list(self.graph.nodes):
             node = self.get_node(node_id)
-            if node.visited:
-                marker.color.r = 0.0
-                marker.color.g = 1.0
-                marker.color.b = 0.0
-                marker.color.a = 1.0
-            else:
-                marker.color.r = 1.0
-                marker.color.g = 0.0
-                marker.color.b = 0.0
-                marker.color.a = 1.0
-
             marker.points.append(Point(x=node.x, y=node.y, z=0.01))
+            if node.visited:
+                marker.colors.append(VISITED_COLOUR)
+            else:
+                marker.colors.append(UNVISITED_COLOUR)
 
         self.marker_pub.publish(marker)
 
@@ -418,7 +417,7 @@ class GraphManager:
         # Exclude the robot's current node.
         return [self.get_node(node_id) for node_id in best_path[1:]]
 
-    def marker_callback(self, msg: String) -> None:
+    def aruco_callback(self, msg: String) -> None:
         """Create a landmark entry when a new ArUco ID is detected."""
 
         try:
@@ -451,10 +450,10 @@ class GraphManager:
             return
 
         # Only create an entry the first time this ID is detected.
-        if marker_id in self.marker_nodes:
+        if marker_id in self.aruco_nodes:
             return
 
-        self.marker_nodes[len(self.marker_nodes)-1] = {
+        self.aruco_nodes[len(self.aruco_nodes)-1] = {
             "id": marker_id,
             "x": x,
             "y": y,
@@ -472,4 +471,4 @@ class GraphManager:
 
     def get_marker_node(self, marker_id: int):
         """Get a stored landmark by ID, or None if it is unknown."""
-        return self.marker_nodes.get(marker_id)
+        return self.aruco_nodes.get(marker_id)
