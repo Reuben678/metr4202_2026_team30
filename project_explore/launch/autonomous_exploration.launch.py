@@ -59,9 +59,9 @@ def generate_launch_description():
     )
 
     rviz_config = os.path.join(
-        nav2_bringup_share,
-        "rviz",
-        "nav2_default_view.rviz",
+        get_package_share_directory("project_explore"),
+        "config",
+        "metr4202_rviz_conf.rviz",
     )
 
     gazebo_ros_launch_directory = os.path.join(
