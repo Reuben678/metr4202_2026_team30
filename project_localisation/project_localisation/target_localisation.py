@@ -105,7 +105,7 @@ class Localizer(Node):
                               'reprojection', 'range_m', 'view_angle_deg'])
 
         self.status = self.create_publisher(String, '/targets/state', LATCH)
-        self.markers = self.create_publisher(MarkerArray, '/targets/markers', LATCH)
+        self.markers = self.create_publisher(MarkerArray, '/targets/aruco', LATCH)
         self.create_subscription(
             Int32, parameter(self, 'id_topic', '/aruco/detected_id'), self.on_id, 20)
         self.create_subscription(
@@ -294,13 +294,14 @@ class Localizer(Node):
         for mid, result in sorted(self.records.items()):
             age = max(0.0, now - result['last_seen'])
             records.append(dict(id=mid, **result, age_s=age, fresh=age <= self.fresh_for))
+            x, y, z = (float(v) for v in result['xyz'][:3])
             marker = Marker()
             marker.header.frame_id = 'map'
             marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns, marker.id = 'target_labels', mid
+            marker.ns, marker.id = 'target_labels', int(mid)
             marker.type, marker.action = Marker.TEXT_VIEW_FACING, Marker.ADD
             marker.pose.orientation.w = 1.0
-            marker.pose.position.x, marker.pose.position.y = result['xyz'][:2]
+            marker.pose.position.x, marker.pose.position.y = x, y
             marker.pose.position.z = result['xyz'][2] + 0.2
             marker.scale.z = 0.15
             marker.color.a, marker.color.r = 1.0, 1.0
@@ -315,17 +316,7 @@ class Localizer(Node):
                      marker_size=self.size, dictionary=self.dictionary_name)
         if ros_output:
             self.status.publish(String(data=json.dumps(state, allow_nan=False)))
-            #self.markers.publish(array)
-            marker_output_json = json.dumps({
-                "id": marker.id,
-                "pos_x": marker.pose.position.x,
-                "pos_y": marker.pose.position.y,
-                "time": {
-                    "sec": state.stamp.sec,
-                    "nanosec": state.stamp.nanosec
-                }
-            })
-            self.markers.publish(marker_output_json)
+            self.markers.publish(array)
         save(self.output / 'targets.json', state)
         self.log_file.flush()
 
