@@ -24,11 +24,10 @@ from metr4202_interfaces.srv import RecoveryTrigger
 
 
 # Defined Macros
-RECOVERY_ATTEMPTS = 3       # Spin + drive attempts per recovery request
 RECOVERY_PERIOD = 10        # Time allowance for a spin [s]
 SERVER_TIMEOUT = 5.0        # Wait for a Nav2 behaviour server [s]
 MIN_RADIUS = 0.3            # Minimum recovery drive distance [m]
-MAX_RADIUS = 1.0            # Maximum recovery drive distance [m]
+MAX_RADIUS = 0.8            # Maximum recovery drive distance [m]
 RADIAL_STEP = 0.1           # Spacing of costmap samples along a bearing [m]
 YAW_STEP = 15               # Spacing of bearings searched [deg]
 DRIVE_SPEED = 0.05          # Recovery drive speed [m/s]
