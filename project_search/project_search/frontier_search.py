@@ -31,6 +31,7 @@ FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 MIN_FRONTIER_SIZE = 3       # Min size of frontier allowable 
 MIN_FRONTIER_DIST = 0.15    # Minimum dist for valid frontiers
 MAX_FRONTIER_DIST = 3       # Max distance considered
+FRONTIER_COLS = 5           # Expected columns in frontier msg
 
 MAP_FRAME = "map"
 ROBOT_FRAME = "base_link"
@@ -49,9 +50,6 @@ class FrontierSearch(Node):
         self.w_cost = 1.0
         self.weight_future = None
         self.service_complete = False
-
-        self.path_navigator = BasicNavigator(node_name="frontier_path_navigator")
-        self.path_navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
 
         # Create timer
         # ___________________________________________________________
@@ -271,55 +269,22 @@ class FrontierSearch(Node):
             wx, wy = self.grid_to_world(centroid_p[0], centroid_p[1], 
                                         resolution, origin_x, origin_y)
  
-            path_distance = math.hypot(wx - rx, wy - ry)
- 
-            if path_distance is None:
-                self.get_logger().debug(f"No path to frontier {label_id}, skipping")
-                continue
+            frontier_dist = math.hypot(wx - rx, wy - ry)
  
             # Keep only local frontiers
-            if not (MIN_FRONTIER_DIST <= path_distance):
+            if not (MIN_FRONTIER_DIST <= frontier_dist):
                 continue
-            utility = self.w_info * size - self.w_cost * path_distance
+            utility = self.w_info * size - self.w_cost * frontier_dist
  
             clusters.append({
                 "label": label_id,
                 "size": size,
                 "centroid": (wx, wy),
-                "dist": path_distance,
                 "utility": utility,
             })
  
         return clusters
 
-    """
-    Compute the path distance to (wx, wy) from Nav2
-    """
-    def compute_path_distance(self, wx, wy) -> Optional[float]:
-            """
-            Ask the Nav2 planner for a path from the robot to (wx, wy) in the map
-            frame and return its length [m], or None if no path was found
-            """
-            goal = PoseStamped()
-            goal.header.frame_id = MAP_FRAME
-            goal.header.stamp = self.path_navigator.get_clock().now().to_msg()
-            goal.pose.position.x = float(wx)
-            goal.pose.position.y = float(wy)
-            goal.pose.orientation.w = 1.0
-    
-            # use_start=False -> the planner starts from the robot's current pose
-            path = self.path_navigator.getPath(PoseStamped(), goal, use_start=False)
-    
-            if path is None or len(path.poses) == 0:
-                return None
-    
-            distance = 0.0
-            for a, b in zip(path.poses[:-1], path.poses[1:]):
-                distance += math.hypot(
-                    b.pose.position.x - a.pose.position.x,
-                    b.pose.position.y - a.pose.position.y
-                )
-            return distance
 
     """
     Convert grid cell indexs to world coords
@@ -345,12 +310,17 @@ class FrontierSearch(Node):
     """
     def package_frontiers(self, clusters):
         rows = [
-            (c["label"], c["size"],
-            c["centroid"][0], c["centroid"][1],
-            c["dist"], c["utility"])
+            (
+            c["label"],
+            c["size"],
+            c["centroid"][0],
+            c["centroid"][1],
+            c["utility"]
+            )
             for c in clusters
         ]
-        arr = np.array(rows, dtype=np.float32).reshape(-1, 6)
+        # Repackage into a 1D array of data
+        arr = np.array(rows, dtype=np.float32).reshape(-1, FRONTIER_COLS)
 
         msg = FrontierArray()
         msg.header.stamp = self.get_clock().now().to_msg()
