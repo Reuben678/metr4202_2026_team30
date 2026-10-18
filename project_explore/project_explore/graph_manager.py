@@ -4,30 +4,35 @@ import math
 from typing import List, Optional, Tuple
 import json
 
-from std_msgs.msg import String
+from nav2_simple_commander.robot_navigator import BasicNavigator
 
 import networkx as nx
 from metr4202_interfaces.srv import GetFrontiers
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 
+from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import ColorRGBA
 
-NODE_MARKER_SIZE = 0.05     # [m] one map cell
-
 Position = Tuple[float, float]
 
-FRONTIER_COLS = 6       # Expected columns in frontier msg
+FRONTIER_COLS = 5           # Expected columns in frontier msg
 
-MERGE_TOLERANCE = 0.8  # Allowable tolerance between frontier nodes [m]
-VISITED_TOLERANCE = 0.5    # Suppress frontiers near visited waypoints [m]
+MERGE_TOLERANCE = 0.8       # Allowable tolerance between frontier nodes [m]
+VISITED_TOLERANCE = 0.5     # Suppress frontiers near visited waypoints [m]
 
-UNASSIGNED_ID = -1      # Place holder
+EDGE_SEARCH_RADIUS = 3 * MERGE_TOLERANCE    # [m] only plan to visited nodes within this straight-line distance
+MAX_EDGE_COUNT = 3
 
-VISITED_COLOUR = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
-UNVISITED_COLOUR = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+UNASSIGNED_ID = -1          # Place holder
+
+NODE_MARKER_SIZE = 0.05     # [m] one map cell              # Node marker size
+VISITED_COLOUR = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)      # Visited node marker RGB
+UNVISITED_COLOUR = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)    # Unvisited node marker RGB
 
 @dataclass
 class Frontier:
@@ -36,7 +41,6 @@ class Frontier:
     size: int
     x: float
     y: float
-    path_distance: float
     utility: float
     visited: bool = False
 
@@ -50,6 +54,10 @@ class GraphManager:
 
     def __init__(self, node: Node) -> None:
         self.node = node
+
+        # Create navigation tools
+        self.path_navigator = BasicNavigator(node_name="frontier_path_navigator")
+        self.path_navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
 
         # RViz display of the graph nodes
         self.marker_pub = self.node.create_publisher(Marker, "graph_nodes", 10)
@@ -90,7 +98,6 @@ class GraphManager:
             size = 0,
             x = robot_position[0],
             y = robot_position[1],
-            path_distance = 0.0,
             utility = 0.0,
             visited = True,
         )
@@ -108,7 +115,7 @@ class GraphManager:
         return any(not self.get_node(node_id).visited for node_id in self.graph.nodes)
     
     def publish_markers(self) -> None:
-        """Publish every graph node position as a yellow cell for RViz."""
+        """Publish every graph node position as RED(unvisited) or GREEN(visited) for RViz"""
 
         marker = Marker()
         marker.header.frame_id = "map"
@@ -142,12 +149,13 @@ class GraphManager:
         for node_id in list(self.graph.nodes):
 
             node = self.get_node(node_id)
-            self.node.get_logger().info(
-                f"Removing stale frontier {node_id} "
-                f"at ({node.x:.2f}, {node.y:.2f})"
-            )
             # Retain visited nodes for back traversal
             if node.visited:
+                node = self.get_node(node_id)
+                self.node.get_logger().info(
+                    f"Removing stale frontier {node_id} "
+                    f"at ({node.x:.2f}, {node.y:.2f})"
+                )
                 continue
 
             # Check whether the node corresponds to a current frontier
@@ -197,8 +205,7 @@ class GraphManager:
             self.node.get_logger().info(
                 f"Candidate: x={frontier.x:.2f}, "
                 f"y={frontier.y:.2f}, "
-                f"utility={frontier.utility:.3f}, "
-                f"path_distance={frontier.path_distance:.2f}"
+                f"utility={frontier.utility:.3f}"
             )
             
 ############# Added to remove outdated unvisited frontiers  ################
@@ -271,13 +278,12 @@ class GraphManager:
                     size=int(row[1]),
                     x=float(row[2]),
                     y=float(row[3]),
-                    path_distance=float(row[4]),
-                    utility=float(row[5]),
+                    utility=float(row[4]),
                 )
             )
         return frontiers
     
-    def find_nearby_node(self, position: Position, visited: bool) -> Optional[int]:
+    def find_proxy_node(self, position: Position, visited: bool) -> Optional[int]:
  
         best_id = None
         tolerance = (VISITED_TOLERANCE if visited else MERGE_TOLERANCE )
@@ -297,10 +303,78 @@ class GraphManager:
  
         return best_id
 
+    def make_pose(self, position: Position, yaw=0.0) -> PoseStamped:
+        p = PoseStamped()
+        p.header.frame_id = "map"
+        p.header.stamp = self.path_navigator.get_clock().now().to_msg()
+        p.pose.position.x = float(position[0])
+        p.pose.position.y = float(position[1])
+        p.pose.orientation.z = math.sin(yaw / 2.0)
+        p.pose.orientation.w = math.cos(yaw / 2.0)
+        return p
+
+    def path_length(self, path) -> float:
+        distance = 0.0
+        for a, b in zip(path.poses[:-1], path.poses[1:]):
+            distance += math.hypot(
+                b.pose.position.x - a.pose.position.x,
+                b.pose.position.y - a.pose.position.y
+            )
+        return distance
+
+    """
+    Compute the path distance to (wx, wy) from Nav2
+    """
+    def compute_path_distance(self, goal, start) -> float:
+            """
+            Ask the Nav2 planner for a path from the robot to (wx, wy) in the map
+            frame and return its length [m], or None if no path was found
+            """
+            # Create PoseStamped from Position to compute path distance
+            goal_pose = self.make_pose(goal)
+            start_pose = self.make_pose(start)
+
+            # use_start=True -> the planner starts from start point given
+            path = self.path_navigator.getPath(start_pose, goal_pose, use_start=True)
+    
+            if path is None or len(path.poses) == 0:
+                return None
+
+            return self.path_length(path)
+
+    """
+    Compute which node is most ideal to connect to current position, using
+    lowest path cost computed, returning node_id and path cost
+    """
+    def get_node_edge(self, frontier_id: int, position: Position):
+        
+        candidates = []
+        for node_id in self.graph.nodes:
+            if node_id == frontier_id:
+                continue
+            node = self.get_node(node_id)
+            if not node.visited:    # Only visited nodes accepted
+                continue
+            euclid = hypot(node.x - position[0], node.y - position[1])
+            if euclid <= EDGE_SEARCH_RADIUS:
+                distance = self.compute_path_distance( position,(node.x, node.y))
+                if distance is None:
+                    continue
+                candidates.append((distance, node_id))
+            
+        if not candidates:
+            self.node.get_logger().warning("NO LOCAL CANDIDATES FOR EDGE")
+            return None
+
+        candidates.sort()
+        best_edges = candidates[:MAX_EDGE_COUNT]    # Only keep the top N edges
+        
+        return best_edges
+
     def add_frontier(self, frontier: Frontier) -> Optional[int]:
     
             # Already been here: discard, otherwise the robot would revisit it.
-            visited_id = self.find_nearby_node(
+            visited_id = self.find_proxy_node(
                 frontier.position,
                 visited=True
             )
@@ -312,7 +386,7 @@ class GraphManager:
                 )
                 return None
     
-            existing_id = self.find_nearby_node(frontier.position, visited=False)
+            existing_id = self.find_proxy_node(frontier.position, visited=False)
     
             if existing_id is not None:
                 # Merge: keep the existing ID, take the latest data, and re-attach the
@@ -322,7 +396,6 @@ class GraphManager:
                 node.size = frontier.size
                 node.x = frontier.x
                 node.y = frontier.y
-                node.path_distance = frontier.path_distance
                 node.utility = frontier.utility
     
                 self.graph.remove_edges_from(list(self.graph.edges(existing_id)))
@@ -338,7 +411,17 @@ class GraphManager:
                 frontier.frontier_id = node_id
                 self.graph.add_node(node_id, frontier=frontier)
     
-            self.graph.add_edge(self.current_node_id, node_id, weight=frontier.path_distance)
+            # Add edge from nearest node to frontier
+            ### TO BE ADDED ####
+            edges = self.get_node_edge(frontier.frontier_id, frontier.position)
+            if edges is None:
+                self.node.get_logger().warning("Could not find suitable edge")
+                self.graph.remove_node(node_id)
+                return None
+            
+            for edge in edges:
+                edge_dist, local_node_id = edge[0], edge[1]
+                self.graph.add_edge(local_node_id, node_id, weight=edge_dist)
             return node_id
 
     def mark_reached(self, node_id: int) -> None:
@@ -453,7 +536,7 @@ class GraphManager:
         if marker_id in self.aruco_nodes:
             return
 
-        self.aruco_nodes[len(self.aruco_nodes)-1] = {
+        self.aruco_nodes[marker_id] = {
             "id": marker_id,
             "x": x,
             "y": y,
