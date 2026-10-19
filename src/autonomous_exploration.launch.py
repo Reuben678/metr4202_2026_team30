@@ -199,6 +199,48 @@ def generate_launch_description():
         ],
     )
 
+<<<<<<< Updated upstream:src/autonomous_exploration.launch.py
+=======
+    recovery_helper = TimerAction(
+        period=20.0,
+        actions=[
+            Node(
+                package="project_explore",
+                executable="recovery_helper",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": use_sim_time,
+                    }
+                ],
+            )
+        ],
+    )
+
+    # ---------------------------------------------------------
+    # ArUco Target Localisation
+    # ---------------------------------------------------------
+
+    # target_localizer = TimerAction(
+    #     period=16.0,
+    #     actions=[
+    #         Node(
+    #             package="project_localisation",
+    #             executable="localizer",
+    #             name="target_localizer",
+    #             output="screen",
+    #             parameters=[{
+    #                 "use_sim_time": use_sim_time,
+    #                 "image_topic": "/camera/image_raw",
+    #                 "info_topic": "/camera/camera_info",
+    #                 "marker_size": 0.10,
+    #             }],
+    #         )
+    #     ],
+    # )
+
+
+>>>>>>> Stashed changes:project_explore/launch/autonomous_exploration.launch.py
     return LaunchDescription(
         [
             declare_use_sim_time,
@@ -216,5 +258,12 @@ def generate_launch_description():
             util_weights,
             frontier_search,
             exploration_manager,
+<<<<<<< Updated upstream:src/autonomous_exploration.launch.py
         ]
     )
+=======
+            recovery_helper,
+            #target_localizer,
+	]
+)
+>>>>>>> Stashed changes:project_explore/launch/autonomous_exploration.launch.py

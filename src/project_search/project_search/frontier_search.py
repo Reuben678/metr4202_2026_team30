@@ -22,8 +22,14 @@ from scipy import ndimage
 
 FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 
+<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
 MIN_FRONTIER_SIZE = 3   # Min size of frontier allowable 
 MIN_FRONTIER_DIST = 3
+=======
+MIN_FRONTIER_SIZE = 3       # Min size of frontier allowable 
+MIN_FRONTIER_DIST = 0.15    # Minimum dist for valid frontiers
+MAX_FRONTIER_DIST = 3       # Max distance considered
+>>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
 MAP_FRAME = "map"
 ROBOT_FRAME = "base_link"
@@ -42,6 +48,9 @@ class FrontierSearch(Node):
         self.w_cost = 1.0
         self.weight_future = None
         self.service_complete = False
+
+        self.path_navigator = BasicNavigator(node_name="frontier_path_navigator")
+        self.path_navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
 
         # Create timer
         # ___________________________________________________________
@@ -243,6 +252,7 @@ class FrontierSearch(Node):
 
         for label_id in range(1, num + 1):
             ys, xs = np.where(labeled == label_id)
+<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
 
             size = len(xs)
             centroid_px = (float(np.mean(xs)), float(np.mean(ys)))
@@ -255,6 +265,67 @@ class FrontierSearch(Node):
             clusters.append({"label": label_id, "size": size, "centroid_px": centroid_px})
 
         return clusters
+=======
+ 
+            size = len(xs)
+ 
+            if size < MIN_FRONTIER_SIZE:
+                continue
+ 
+            centroid_p = (float(np.mean(xs)), float(np.mean(ys)))
+            wx, wy = self.grid_to_world(centroid_p[0], centroid_p[1], 
+                                        resolution, origin_x, origin_y)
+ 
+            path_distance = math.hypot(wx - rx, wy - ry)
+ 
+            if path_distance is None:
+                self.get_logger().debug(f"No path to frontier {label_id}, skipping")
+                continue
+ 
+            # Keep only local frontiers
+            if not (MIN_FRONTIER_DIST <= path_distance):
+                continue
+            utility = self.w_info * size - self.w_cost * path_distance
+ 
+            clusters.append({
+                "label": label_id,
+                "size": size,
+                "centroid": (wx, wy),
+                "dist": path_distance,
+                "utility": utility,
+            })
+ 
+        return clusters
+
+    """
+    Compute the path distance to (wx, wy) from Nav2
+    """
+    def compute_path_distance(self, wx, wy) -> Optional[float]:
+            """
+            Ask the Nav2 planner for a path from the robot to (wx, wy) in the map
+            frame and return its length [m], or None if no path was found
+            """
+            goal = PoseStamped()
+            goal.header.frame_id = MAP_FRAME
+            goal.header.stamp = self.path_navigator.get_clock().now().to_msg()
+            goal.pose.position.x = float(wx)
+            goal.pose.position.y = float(wy)
+            goal.pose.orientation.w = 1.0
+    
+            # use_start=False -> the planner starts from the robot's current pose
+            path = self.path_navigator.getPath(PoseStamped(), goal, use_start=False)
+    
+            if path is None or len(path.poses) == 0:
+                return None
+    
+            distance = 0.0
+            for a, b in zip(path.poses[:-1], path.poses[1:]):
+                distance += math.hypot(
+                    b.pose.position.x - a.pose.position.x,
+                    b.pose.position.y - a.pose.position.y
+                )
+            return distance
+>>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
     """
     Convert grid cell indexs to world coords
@@ -295,11 +366,19 @@ class FrontierSearch(Node):
     def package_frontiers(self, clusters, resolution, origin):
         rows = [
             (c["label"], c["size"],
+<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
             origin.x + (c["centroid_px"][0] + 0.5) * resolution,
             origin.y + (c["centroid_px"][1] + 0.5) * resolution)
             for c in clusters
         ]
         arr = np.array(rows, dtype=np.float32).reshape(-1, 4)
+=======
+            c["centroid"][0], c["centroid"][1],
+            c["dist"], c["utility"])
+            for c in clusters
+        ]
+        arr = np.array(rows, dtype=np.float32).reshape(-1, 6)
+>>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
         msg = FrontierArray()
         msg.header.stamp = self.get_clock().now().to_msg()

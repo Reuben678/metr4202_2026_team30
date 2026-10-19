@@ -2,8 +2,6 @@ import math
 import numpy as np
 import cv2
 
-
-
 def rotation(q):
     q = np.asarray(q, dtype=float)
     if q.shape != (4,) or not np.isfinite(q).all() or np.linalg.norm(q) < 1e-8:
@@ -15,10 +13,10 @@ def rotation(q):
         [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)],
     ])
 
-
 def transform(point, translation, quaternion):
     return rotation(quaternion) @ np.asarray(point) + np.asarray(translation)
 
+<<<<<<< Updated upstream:src/project_localisation/marker_geometry.py
 
 def grid_world(y, x, resolution, origin, yaw):
     a, b = (x+0.5)*resolution, (y+0.5)*resolution
@@ -32,12 +30,13 @@ def world_grid(x, y, resolution, origin, yaw):
     return math.floor((b*c-a*s)/resolution), math.floor((a*c+b*s)/resolution)
 
 
+=======
+>>>>>>> Stashed changes:project_localisation/project_localisation/marker_geometry.py
 def square_points(size):
     if not math.isfinite(size) or size <= 0:
         raise ValueError('marker_size must be a positive length in metres')
     h = size/2
     return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=float)
-
 
 def estimate(corners, size, K, D, width, height,
              min_side=25.0, max_range=3.0, max_error=2.0):
@@ -83,7 +82,6 @@ def estimate(corners, size, K, D, width, height,
                         range_m=distance, view_angle_deg=angle)
     return best
 
-
 def fuse(samples, min_n=8, min_span=1.5, min_baseline=0.15, max_scatter=0.15):
     if not samples:
         return None
@@ -105,12 +103,14 @@ def fuse(samples, min_n=8, min_span=1.5, min_baseline=0.15, max_scatter=0.15):
     scatter = float(np.quantile(np.linalg.norm(points-centre, axis=1), 0.95))
     baseline = float(np.max(np.linalg.norm(cameras[:, None, :]-cameras[None, :, :], axis=2)))
     span = float(times[-1]-times[0])
-    confirmed = (len(points) >= min_n and span >= min_span
-                 and baseline >= min_baseline and scatter <= max_scatter)
+    confirmed = (
+        len(points) >= min_n
+        and span >= min_span
+        and scatter <= max_scatter
+    )
     return dict(xyz=centre.tolist(), n=len(points), scatter=scatter,
                 baseline=baseline, span=span, confirmed=bool(confirmed),
                 inlier_stamp=float(times[-1]))
-
 
 def update_record(previous, current, stamp, tolerance=0.25):
     result = dict(current, last_seen=stamp,

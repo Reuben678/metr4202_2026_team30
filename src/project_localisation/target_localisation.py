@@ -55,9 +55,16 @@ class Localizer(Node):
         self.scatter = parameter(self, 'max_scatter', 0.15)
         self.max_age = parameter(self, 'max_image_age', 1.0)
         self.fresh_for = parameter(self, 'fresh_for', 10.0)
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
         # Preserve the teammate-ID contract by default. Independent tests can
         # disable this gate because this node already decodes the marker ID.
         self.require_announced_ids = parameter(self, 'require_announced_ids', True)
+=======
+
+        # Decode marker IDs locally by default, as in the working live test.
+        # Set true only when a separate node publishes /aruco/detected_id.
+        self.require_announced_ids = parameter(self, 'require_announced_ids', False)
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
         self.track_capacity = parameter(self, 'track_capacity', 100)
         if self.track_capacity < 8:
             raise ValueError('track_capacity must be at least 8')
@@ -72,8 +79,14 @@ class Localizer(Node):
             raise ValueError('A 6x6 ArUco dictionary and OpenCV aruco are required')
         if not hasattr(cv2.aruco, self.dictionary_name):
             raise ValueError('Unknown ArUco dictionary: ' + self.dictionary_name)
-        self.dictionary = cv2.aruco.getPredefinedDictionary(
-            getattr(cv2.aruco, self.dictionary_name))
+        # Match the API used by the known-working standalone detector.
+        # Keep fallbacks for OpenCV versions that expose the newer API only.
+        if hasattr(cv2.aruco, 'Dictionary_get'):
+            self.dictionary = cv2.aruco.Dictionary_get(
+                getattr(cv2.aruco, self.dictionary_name))
+        else:
+            self.dictionary = cv2.aruco.getPredefinedDictionary(
+                getattr(cv2.aruco, self.dictionary_name))
         if hasattr(cv2.aruco, 'DetectorParameters_create'):
             self.detector_parameters = cv2.aruco.DetectorParameters_create()
         else:
@@ -95,6 +108,7 @@ class Localizer(Node):
         self.last_clock = self.now_s()
         self.tf = Buffer(cache_time=Duration(seconds=20))
         self.listener = TransformListener(self.tf, self)
+        self._visible_marker_ids = set()
 
         base = Path(parameter(self, 'output_dir', '~/localisation_runs')).expanduser()
         self.output = base / datetime.now().strftime('run_%Y%m%d_%H%M%S_%f')
@@ -122,6 +136,12 @@ class Localizer(Node):
             self.get_logger().info('Start this node before the one-shot ID detector.')
         else:
             self.get_logger().info('Using IDs decoded locally from each image.')
+
+        self.marker_viz_pub = self.create_publisher(
+            MarkerArray,
+            '/target_markers',
+            10
+        )
 
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -209,18 +229,34 @@ class Localizer(Node):
 
             self.last_image_ns = stamp_ns
 
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
             gray = self.bridge.imgmsg_to_cv2(
                 msg, desired_encoding='mono8'
             )
 
+=======
+            # Match the working live test's image path: decode BGR8, then
+            # convert to grayscale before ArUco detection.
+            frame = self.bridge.imgmsg_to_cv2(
+                msg, desired_encoding='bgr8'
+            )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Use the same detectMarkers call as the working standalone test
+            # when available; support newer OpenCV's ArucoDetector as well.
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
             if self.detector is not None:
                 corners, ids, _ = self.detector.detectMarkers(gray)
             else:
                 corners, ids, _ = cv2.aruco.detectMarkers(
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
                     gray,
                     self.dictionary,
                     parameters=self.detector_parameters,
                 )
+=======
+                    gray, self.dictionary, parameters=self.detector_parameters)
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
 
             if ids is None:
                 return
@@ -336,18 +372,110 @@ class Localizer(Node):
             if pending:
                 self.queue.append(dict(data, items=pending))
 
+    def publish_marker_visualization(self):
+        msg = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        visible_ids = {
+            mid for mid, record in self.records.items()
+            if record.get('confirmed', False)
+        }
+
+        # Remove markers that are no longer confirmed.
+        for mid in getattr(self, '_visible_marker_ids', set()) - visible_ids:
+            for marker_id in (mid * 2, mid * 2 + 1):
+                marker = Marker()
+                marker.header.frame_id = 'map'
+                marker.header.stamp = now
+                marker.ns = 'detected_targets'
+                marker.id = marker_id
+                marker.action = Marker.DELETE
+                msg.markers.append(marker)
+
+        for mid in sorted(visible_ids):
+            record = self.records[mid]
+            x, y, z = record['xyz']
+
+            # Sphere showing the target position.
+            sphere = Marker()
+            sphere.header.frame_id = 'map'
+            sphere.header.stamp = now
+            sphere.ns = 'detected_targets'
+            sphere.id = mid * 2
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+
+            sphere.pose.position.x = float(x)
+            sphere.pose.position.y = float(y)
+            sphere.pose.position.z = float(z)
+            sphere.pose.orientation.w = 1.0
+
+            sphere.scale.x = 0.12
+            sphere.scale.y = 0.12
+            sphere.scale.z = 0.12
+
+            sphere.color.r = 0.1
+            sphere.color.g = 1.0
+            sphere.color.b = 0.2
+            sphere.color.a = 1.0
+
+            msg.markers.append(sphere)
+
+            # Text label above the sphere.
+            label = Marker()
+            label.header.frame_id = 'map'
+            label.header.stamp = now
+            label.ns = 'detected_targets'
+            label.id = mid * 2 + 1
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+
+            label.pose.position.x = float(x)
+            label.pose.position.y = float(y)
+            label.pose.position.z = float(z) + 0.15
+            label.pose.orientation.w = 1.0
+
+            label.scale.z = 0.12
+            label.color.r = 1.0
+            label.color.g = 1.0
+            label.color.b = 1.0
+            label.color.a = 1.0
+            label.text = f'Marker {mid}'
+
+            msg.markers.append(label)
+
+        self.marker_viz_pub.publish(msg)
+        self._visible_marker_ids = visible_ids
+
     def publish(self, ros_output=True):
+        # Update target position estimates from new observations.
         for mid in sorted(self.dirty):
             samples = list(self.tracks[mid])
-            result = fuse(samples, min_baseline=self.baseline, max_scatter=self.scatter)
+            result = fuse(
+                samples,
+                min_baseline=self.baseline,
+                max_scatter=self.scatter
+            )
             if result is not None:
-                self.records[mid] = update_record(self.records.get(mid), result, samples[-1][0])
+                self.records[mid] = update_record(
+                    self.records.get(mid),
+                    result,
+                    samples[-1][0]
+                )
+
         self.dirty.clear()
+
         now = self.now_s()
         records = []
-        array = MarkerArray(markers=[Marker(action=Marker.DELETEALL)])
+
+        # Clear previous RViz markers before publishing the current set.
+        array = MarkerArray(
+            markers=[Marker(action=Marker.DELETEALL)]
+        )
+
         for mid, result in sorted(self.records.items()):
             age = max(0.0, now - result['last_seen'])
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
             records.append(dict(id=mid, **result, age_s=age, fresh=age <= self.fresh_for))
             marker = Marker()
             marker.header.frame_id = 'map'
@@ -379,12 +507,121 @@ class Localizer(Node):
                     {
                         "id": mid,
                         "xyz": result["xyz"]
+=======
+            fresh = age <= self.fresh_for
+
+            records.append(dict(
+                id=mid,
+                **result,
+                age_s=age,
+                fresh=fresh
+            ))
+
+            x, y, z = result['xyz']
+            confirmed = result['confirmed']
+
+            # Sphere representing the estimated target position.
+            sphere = Marker()
+            sphere.header.frame_id = 'map'
+            sphere.header.stamp = self.get_clock().now().to_msg()
+            sphere.ns = 'detected_targets'
+            sphere.id = mid * 2
+            sphere.type = Marker.SPHERE
+            sphere.action = Marker.ADD
+
+            sphere.pose.position.x = float(x)
+            sphere.pose.position.y = float(y)
+            sphere.pose.position.z = float(z)
+            sphere.pose.orientation.w = 1.0
+
+            sphere.scale.x = 0.12
+            sphere.scale.y = 0.12
+            sphere.scale.z = 0.12
+
+            # Green = confirmed, yellow = tentative.
+            sphere.color.r = 0.1 if confirmed else 1.0
+            sphere.color.g = 1.0
+            sphere.color.b = 0.1 if confirmed else 0.0
+            sphere.color.a = 1.0
+
+            # Fade stale targets so old detections are distinguishable.
+            if not fresh:
+                sphere.color.a = 0.35
+
+            array.markers.append(sphere)
+
+            # Text label positioned above the sphere.
+            label = Marker()
+            label.header.frame_id = 'map'
+            label.header.stamp = self.get_clock().now().to_msg()
+            label.ns = 'target_labels'
+            label.id = mid * 2 + 1
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+
+            label.pose.position.x = float(x)
+            label.pose.position.y = float(y)
+            label.pose.position.z = float(z) + 0.2
+            label.pose.orientation.w = 1.0
+
+            label.scale.z = 0.15
+            label.color.r = 1.0
+            label.color.g = 1.0 if confirmed else 0.7
+            label.color.b = 0.0
+            label.color.a = 1.0 if fresh else 0.35
+
+            status = 'confirmed' if confirmed else 'tentative'
+            if not fresh:
+                status += ' (stale)'
+
+            label.text = f'ID {mid}: {status}'
+            array.markers.append(label)
+
+        # Publish target state and marker data.
+        state = dict(
+            frame='map',
+            epoch=self.epoch,
+            run_id=self.output.name,
+            stamp=now,
+            camera_age=(
+                None if self.raw_time is None
+                else max(0.0, now - self.raw_time)
+            ),
+            announced_ids=sorted(self.announced_ids),
+            targets=records,
+            require_announced_ids=self.require_announced_ids,
+            pending_observations=len(self.queue),
+            marker_size=self.size,
+            dictionary=self.dictionary_name
+        )
+
+        if ros_output:
+            self.status.publish(
+                String(data=json.dumps(state, allow_nan=False))
+            )
+
+            marker_output_json = json.dumps({
+                'targets': [
+                    {
+                        'id': mid,
+                        'xyz': result['xyz']
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
                     }
                     for mid, result in sorted(self.records.items())
                 ]
             }, allow_nan=False)
 
+<<<<<<< Updated upstream:src/project_localisation/target_localisation.py
             self.markers.publish(String(data=marker_output_json))
+
+>>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
+=======
+            self.markers.publish(
+                String(data=marker_output_json)
+            )
+
+            # Publish visualization markers for RViz2.
+            self.marker_viz_pub.publish(array)
 
 >>>>>>> Stashed changes:project_localisation/project_localisation/target_localisation.py
         save(self.output / 'targets.json', state)
