@@ -44,3 +44,11 @@ ros2 launch project_explore autonomous_exploration.launch.py
 The launch file starts the TurtleBot3 Gazebo world, SLAM, Nav2, RViz2, the
 frontier search and utility nodes, and the Exploration Manager. Gazebo and Rviz2 take some time 
 to start up.
+
+### Launch the ArUco Detection Module
+
+```bash
+python3 project_localisation/project_localisation/target_localisation.py 
+```
+
+The launch file starts the module responsible for ArUco Marker Detection and corresponding RViz visualisation.
