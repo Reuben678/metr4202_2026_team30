@@ -1,5 +1,6 @@
 # Request:
 bool complete   # Shutdown node trigger
+bool map_refresh
 ---
 # Response
 bool success

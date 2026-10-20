@@ -33,6 +33,7 @@ YAW_STEP = 15               # Spacing of bearings searched [deg]
 DRIVE_SPEED = 0.05          # Recovery drive speed [m/s]
 DRIVE_MARGIN = 5            # Extra time allowance on top of distance / speed [s]
 SHUTDOWN_DELAY = 1.0        # Delay after replying before shutdown [s]
+MAP_REFRESH_SPIN_TIMEOUT = 25  # Maximum duration of map refresh spin [s]
 
 # Costmap values (nav_msgs/OccupancyGrid scaling of the Nav2 costmap)
 UNKNOWN_COST = -1
@@ -97,7 +98,7 @@ class RecoveryHelper(Node):
     def costmap_callback(self, msg: OccupancyGrid):
         self.latest_costmap = msg
 
-    def recovery_callback(self, request, response):
+    async def recovery_callback(self, request, response):
 
         if request.complete:
             # Reply first, then shut down shortly after so the reply is delivered
@@ -112,10 +113,18 @@ class RecoveryHelper(Node):
             response.success = False
             return response
 
-        # Trigger a manual failure recovery
+        # Trigger the requested recovery behaviour
         self.recovering = True
+
         try:
-            outcome = self.failure_recovery()
+            if request.map_refresh:
+                self.get_logger().info("Map refresh recovery requested.")
+                outcome = await self.map_refresh_recovery()
+
+            else:
+                self.get_logger().info("Navigation failure recovery requested.")
+                outcome = self.failure_recovery()
+
         finally:
             self.recovering = False
 
@@ -149,6 +158,46 @@ class RecoveryHelper(Node):
             return None
         return self.latest_costmap
 
+    async def map_refresh_recovery(self) -> bool:
+        """Rotate the robot 360 degrees to encourage a SLAM map refresh."""
+
+        self.get_logger().warn("### Map refresh recovery initiated ###")
+
+        # Check that Nav2's Spin action server is available
+        if not self.spin_client.wait_for_server(timeout_sec=SERVER_TIMEOUT):
+            self.get_logger().error("Spin action server unavailable.")
+            return False
+
+        # Configure a full 360-degree rotation
+        goal = Spin.Goal()
+
+        goal.target_yaw = float(2.0 * math.pi)
+        goal.time_allowance = Duration(sec=MAP_REFRESH_SPIN_TIMEOUT)
+
+        self.get_logger().info("Requesting 360-degree rotation.")
+
+        try:
+            # Send the rotation command to Nav2
+            goal_handle = await self.spin_client.send_goal_async(goal)
+
+            if goal_handle is None or not goal_handle.accepted:
+                self.get_logger().warn("Map refresh spin rejected.")
+                return False
+
+            # Wait until Nav2 finishes the rotation
+            result = await goal_handle.get_result_async()
+
+            if result.status == GoalStatus.STATUS_SUCCEEDED:
+                self.get_logger().info("Map refresh rotation completed.")
+                return True
+
+            self.get_logger().warn(f"Map refresh spin failed with status {result.status}.")
+            return False
+
+        except Exception as error:
+            self.get_logger().error(f"Map refresh recovery error: {error}")
+            return False
+    
     def failure_recovery(self) -> bool:
 
         self.get_logger().warn("### Failure recovery called ###")

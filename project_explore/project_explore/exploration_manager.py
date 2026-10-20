@@ -2,6 +2,9 @@ from enum import Enum, auto
 from math import hypot
 from typing import List, Optional, Tuple
 
+import time
+from nav_msgs.msg import OccupancyGrid
+
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
@@ -13,6 +16,8 @@ from .nav2_handler import NavigationResult, Nav2Handler
 from metr4202_interfaces.srv import RecoveryTrigger
 
 COMPLETION_THRESHOLD = 3
+MAX_MAP_RECOVERY_ATTEMPTS = 2
+MAP_REFRESH_WAIT = 5.0  # Seconds
 
 class ExplorationState(Enum):
     """States used to control the exploration process."""
@@ -25,6 +30,7 @@ class ExplorationState(Enum):
     RECOVERING = auto()
     UPDATING_RECORDS = auto()
     COMPLETE = auto()
+    VERIFYING_COMPLETION = auto()
 
 
 class ExplorationManager(Node):
@@ -35,12 +41,29 @@ class ExplorationManager(Node):
 
         self.state = ExplorationState.INITIALISING
 
+        # Map recovery tracking
+        self.map_recovery_attempts = 0
+        self.map_recovery_phase = "request"
+
+        # Map status before and after recovery
+        self.map_change_baseline = 0
+        self.map_message_baseline = 0
+        self.map_wait_deadline = None
+
+        # Completion verification
+        self.confirm_after_refresh = False
+        self.map_verification_paused = False
+        self.map_pause_change_count = 0
+
         # Used to find the robot's current position on the generated map.
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Retains selected traversal route
         self.traversal_route: List[Frontier] = []
+
+        # Track the last successfully reached graph node.
+        self.last_reached_node_id = None
 
         # The planner uses this node to request frontiers from Frontier Search.
         self.graph_manager = GraphManager(self)
@@ -52,6 +75,9 @@ class ExplorationManager(Node):
         # Stores the active recovery request.
         self.recovery_future = None
 
+        # Identifies which recovery behaviour is required.
+        self.recovery_type = None
+
         self.current_goal: Optional[Frontier] = None
         self.last_navigation_result: Optional[NavigationResult] = None
 
@@ -62,8 +88,43 @@ class ExplorationManager(Node):
         # Number of consecutive frontier updates with no valid goals
         self.empty_frontier_count = 0
 
+        # Occupancy map monitoring
+        self.latest_map = None
+        self.last_map_received_time = None
+        self.map_message_count = 0
+        self.last_map_change_time = None
+        self.map_change_count = 0
+
+        self.map_subscription = self.create_subscription(OccupancyGrid, "/map", self.map_callback, 10)
+
         self.timer = self.create_timer(0.10, self.step)
         self.get_logger().info("Exploration Manager initialised.")
+
+    def map_callback(self, msg: OccupancyGrid) -> None:
+        """Monitor occupancy map messages and detect changes."""
+
+        now = time.monotonic()
+
+        # Record that a new map message has arrived
+        self.last_map_received_time = now
+        self.map_message_count += 1
+
+        # Determine whether the occupancy grid has changed
+        map_changed = (
+            self.latest_map is None
+            or msg.data != self.latest_map.data
+            or msg.info.width != self.latest_map.info.width
+            or msg.info.height != self.latest_map.info.height
+            or msg.info.resolution != self.latest_map.info.resolution
+            or msg.info.origin != self.latest_map.info.origin
+        )
+
+        if map_changed:
+            self.last_map_change_time = now
+            self.map_change_count += 1
+
+        # Store the newest map for the next comparison
+        self.latest_map = msg
 
     def dependencies_available(self) -> bool:
         """Wait for Nav2 once before exploration starts."""
@@ -100,8 +161,11 @@ class ExplorationManager(Node):
         frontier = self.graph_manager.select_goal()
 
         if frontier is not None:
-            #valid exp goal has been found
-            self.empty_frontier_count = 0 
+            # Reset completion verification after finding a goal
+            self.empty_frontier_count = 0
+            self.map_recovery_attempts = 0
+            self.confirm_after_refresh = False
+            self.map_verification_paused = False
 
             self.current_goal = frontier
             self.state = ExplorationState.EXPLORING
@@ -129,15 +193,35 @@ class ExplorationManager(Node):
 
             if self.empty_frontier_count >= COMPLETION_THRESHOLD:
 
-                self.get_logger().info("Exploration completion confirmed.")
+                if self.confirm_after_refresh:
 
-                self.state = ExplorationState.COMPLETE
+                        self.get_logger().info(
+                            "Map refresh completed and no reachable "
+                            "frontiers remain. Exploration complete."
+                        )
+
+                        self.state = ExplorationState.COMPLETE
+
+                else:
+
+                    self.get_logger().info(
+                        "No valid frontiers remain. "
+                        "Verifying map before completion."
+                    )
+
+                    self.state = ExplorationState.VERIFYING_COMPLETION
 
             else:
                 # Request fresh frontiers before confirming completion.
                 self.state = ExplorationState.REQUESTING_PLAN
 
             return
+
+        # Valid traversal route found, reset completion verification
+        self.empty_frontier_count = 0
+        self.map_recovery_attempts = 0
+        self.confirm_after_refresh = False
+        self.map_verification_paused = False
 
         # The last node is the unexplored destination.
         self.traversal_target = route[-1]
@@ -234,53 +318,153 @@ class ExplorationManager(Node):
 
         else:
             self.get_logger().warning("Navigation failed. Entering recovery state.")
+            self.recovery_type = "navigation"
             self.state = ExplorationState.RECOVERING
 
     def request_recovery(self) -> None:
-        """Request a recovery manoeuvre from the Recovery Helper."""
+        """Request the selected recovery manoeuvre."""
 
         if self.recovery_future is not None:
             return
 
         if not self.recovery_client.service_is_ready():
-            self.get_logger().warning(
-                "Recovery service is not available."
-            )
-            self.state = ExplorationState.UPDATING_RECORDS
+            self.get_logger().warning("Recovery service is not available.")
+
+            # keep existing navigation recovery behaviour.
+            if self.recovery_type == "navigation":
+                self.state = ExplorationState.UPDATING_RECORDS
+
             return
 
         request = RecoveryTrigger.Request()
         request.complete = False
+        request.map_refresh = (self.recovery_type == "map")
+
+        if self.recovery_type == "map":
+
+            # Record map state before performing recovery.
+            self.map_change_baseline = self.map_change_count
+
+            self.map_recovery_attempts += 1
+
+            self.get_logger().info(
+                f"Map recovery attempt "
+                f"{self.map_recovery_attempts}/"
+                f"{MAX_MAP_RECOVERY_ATTEMPTS}"
+            )
 
         self.recovery_future = self.recovery_client.call_async(request)
 
-        self.get_logger().info("Recovery requested.")
+        self.get_logger().info(f"{self.recovery_type} recovery requested.")
+
 
     def process_recovery(self) -> None:
-        """Check whether the recovery manoeuvre has finished."""
+        """Process navigation or occupancy-map recovery."""
 
+        # 1. Waiting for a map following recovery
+        if (
+            self.recovery_type == "map" and self.map_recovery_phase == "wait_map"):
+            self.wait_for_map_refresh()
+            return
+
+        # 2. Send recovery request
         if self.recovery_future is None:
             self.request_recovery()
             return
 
+
+        # 3. Wait for Recovery Helper response
         if not self.recovery_future.done():
             return
 
         try:
             response = self.recovery_future.result()
-
-            if response.success:
-                self.get_logger().info("Recovery manoeuvre succeeded.")
-            else:
-                self.get_logger().warning("Recovery manoeuvre failed.")
+            succeeded = response is not None and response.success
 
         except Exception as error:
             self.get_logger().error(f"Recovery service failed: {error}")
+            succeeded = False
 
-        finally:
-            self.recovery_future = None
-            self.state = ExplorationState.UPDATING_RECORDS
-    
+        self.recovery_future = None
+
+        # 4. Handle map recovery
+        if self.recovery_type == "map":
+
+            if succeeded:
+
+                self.get_logger().info(
+                    "Map recovery rotation completed. "
+                    "Waiting for updated occupancy map."
+                )
+
+                # Record the messages received at spin completion.
+                self.map_message_baseline = self.map_message_count
+
+                # Allow time for SLAM to publish another map.
+                self.map_wait_deadline = (time.monotonic() + MAP_REFRESH_WAIT)
+
+                self.map_recovery_phase = "wait_map"
+
+            else:
+
+                self.get_logger().warning("Map recovery rotation failed.")
+
+                self.map_recovery_phase = "request"
+                self.state = ExplorationState.VERIFYING_COMPLETION
+
+            return
+
+        # 5. Handle existing navigation recovery
+        if succeeded:
+            self.get_logger().info("Navigation recovery manoeuvre succeeded.")
+        else:
+            self.get_logger().warning("Navigation recovery manoeuvre failed.")
+
+        self.recovery_type = None
+        self.state = ExplorationState.UPDATING_RECORDS
+
+    def wait_for_map_refresh(self) -> None:
+        """Wait for SLAM, then request fresh frontiers after map recovery."""
+
+        # Give SLAM time to process the rotation.
+        if time.monotonic() < self.map_wait_deadline:
+            return
+
+        # Check whether a fresh map was published.
+        new_message = (self.map_message_count > self.map_message_baseline)
+
+        # Check whether occupancy information actually changed.
+        map_changed = (self.map_change_count > self.map_change_baseline)
+
+        if new_message and map_changed:
+            self.get_logger().info(
+                "Occupancy map changed following recovery. "
+                "Requesting fresh frontiers."
+            )
+
+        elif new_message:
+            self.get_logger().info(
+                "Occupancy map updated but data unchanged. "
+                "Checking for remaining frontiers."
+            )
+
+        else:
+            self.get_logger().warning(
+                "No new occupancy map received after recovery. "
+                "Rechecking available frontiers."
+            )
+
+        # Rotation succeeded and a fresh map message was received.
+        # The occupancy values do not need to change.
+        self.confirm_after_refresh = new_message
+
+        # Request a new set of frontiers regardless of map changes.
+        self.empty_frontier_count = 0
+        self.map_recovery_phase = "request"
+        self.recovery_type = None
+
+        self.state = ExplorationState.REQUESTING_PLAN
+            
     def update_records(self) -> None:
         """Update the graph and determine the next state."""
 
@@ -295,12 +479,24 @@ class ExplorationManager(Node):
 
         if succeeded:
             self.graph_manager.mark_reached(node_id)
-            self.get_logger().info(f"Reached graph node {node_id}.")
-        else:
-            removed = self.graph_manager.remove_node(node_id)
+            self.last_reached_node_id = node_id
 
-            if not removed:
-                self.get_logger().warning(f"Could not remove failed node {node_id}.")
+            self.get_logger().info(f"Reached graph node {node_id}.")
+
+        else:
+            if previous_mode == ExplorationState.TRAVERSING:
+                # Keep previously visited nodes and their graph connections.
+                self.get_logger().warning(
+                    f"Failed traversal to visited node {node_id}. "
+                    "Preserving graph connectivity."
+                )
+
+            else:
+                # Remove failed, unexplored frontier nodes only.
+                removed = self.graph_manager.remove_node(node_id)
+
+                if not removed:
+                    self.get_logger().warning(f"Could not remove failed node {node_id}.")
 
             self.get_logger().warning(f"Failed to reach graph node {node_id}.")
 
@@ -351,6 +547,7 @@ class ExplorationManager(Node):
                 return
 
             self.graph_manager.initialise(robot_position)
+            self.last_reached_node_id = 0
 
             self.get_logger().info(
                 f"Graph initialised at ({robot_position[0]:.2f}, "
@@ -413,6 +610,72 @@ class ExplorationManager(Node):
     
         elif self.state == ExplorationState.UPDATING_RECORDS:
             self.update_records()
+
+        elif self.state == ExplorationState.VERIFYING_COMPLETION:
+
+            if self.map_verification_paused:
+
+                # If the map eventually changes, resume planning.
+                if self.map_change_count > self.map_pause_change_count:
+
+                    self.get_logger().info("New map information detected. Resuming exploration.")
+
+                    self.map_verification_paused = False
+                    self.map_recovery_attempts = 0
+                    self.empty_frontier_count = 0
+                    self.confirm_after_refresh = False
+
+                    self.state = ExplorationState.REQUESTING_PLAN
+
+            elif self.map_recovery_attempts >= MAX_MAP_RECOVERY_ATTEMPTS:
+
+                # Check whether any unexplored graph nodes remain.
+                remaining_frontiers = [
+                    node_id
+                    for node_id in self.graph_manager.graph.nodes
+                    if not self.graph_manager.get_node(node_id).visited
+                ]
+
+                # Check whether SLAM has published a recent map.
+                map_is_recent = (
+                    self.last_map_received_time is not None
+                    and time.monotonic() - self.last_map_received_time <= 10.0
+                )
+
+                if (
+                    not remaining_frontiers
+                    and map_is_recent
+                    and self.empty_frontier_count >= COMPLETION_THRESHOLD
+                ):
+                    # Completion should not depend on a successful spin
+                    # when no eligible unexplored frontiers remain.
+                    self.get_logger().info(
+                        "Map verification spin could not be completed, "
+                        "but the latest map is recent and no eligible "
+                        "unvisited frontiers remain. Exploration complete."
+                    )
+
+                    self.state = ExplorationState.COMPLETE
+
+                else:
+                    # Unvisited frontiers or stale map: don't claim success.
+                    self.get_logger().error(
+                        "Map verification failed and exploration "
+                        "completion cannot be confirmed. "
+                        f"Unvisited graph frontiers: "
+                        f"{len(remaining_frontiers)}; "
+                        f"recent map available: {map_is_recent}."
+                    )
+
+                    self.map_verification_paused = True
+                    self.map_pause_change_count = self.map_change_count
+
+
+            else:
+
+                self.recovery_type = "map"
+                self.map_recovery_phase = "request"
+                self.state = ExplorationState.RECOVERING
 
         elif self.state == ExplorationState.COMPLETE:
             if not self.mission_complete:

@@ -25,7 +25,7 @@ FRONTIER_COLS = 5           # Expected columns in frontier msg
 MERGE_TOLERANCE = 0.8       # Allowable tolerance between frontier nodes [m]
 VISITED_TOLERANCE = 0.5     # Suppress frontiers near visited waypoints [m]
 
-EDGE_SEARCH_RADIUS = 3 * VISITED_TOLERANCE    # [m] only plan to visited nodes within this straight-line distance
+EDGE_SEARCH_RADIUS = 3 * MERGE_TOLERANCE    # [m] only plan to visited nodes within this straight-line distance
 MAX_EDGE_COUNT = 3
 
 UNASSIGNED_ID = -1          # Place holder
