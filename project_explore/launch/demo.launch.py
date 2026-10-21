@@ -26,7 +26,7 @@ def generate_launch_description():
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(tb3_nav2_launch),
         launch_arguments={
-            "use_sim_time": "False",
+            "use_sim_time": False,
             "slam": "True",
         }.items(),
     )
@@ -44,7 +44,7 @@ def generate_launch_description():
         name="util_weights",
         output="screen",
         parameters=[{
-            "use_sim_time": "False",
+            "use_sim_time": False,
         }],
     )
 
@@ -61,7 +61,7 @@ def generate_launch_description():
                 name="frontier_search",
                 output="screen",
                 parameters=[{
-                    "use_sim_time": "False",
+                    "use_sim_time": False,
                 }],
             )
         ],
@@ -77,7 +77,7 @@ def generate_launch_description():
         name="recovery_helper",
         output="screen",
         parameters=[{
-            "use_sim_time": "False",
+            "use_sim_time": False,
         }],
     )
 
@@ -94,7 +94,7 @@ def generate_launch_description():
                 name="exploration_manager",
                 output="screen",
                 parameters=[{
-                    "use_sim_time": "False",
+                    "use_sim_time": False,
                 }],
             )
         ],
@@ -110,7 +110,7 @@ def generate_launch_description():
         name="target_localizer",
         output="screen",
         parameters=[{
-            "use_sim_time": "False",
+            "use_sim_time": False,
             "image_topic": "/camera/image_raw",
             "info_topic": "/camera/camera_info",
             "marker_size": 0.10,
