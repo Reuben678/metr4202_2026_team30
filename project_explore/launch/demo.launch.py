@@ -27,7 +27,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(tb3_nav2_launch),
         launch_arguments={
             "use_sim_time": False,
-            "slam": "True",
+            "slam": True,
         }.items(),
     )
 
