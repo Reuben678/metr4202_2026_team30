@@ -32,7 +32,7 @@ def generate_launch_description():
     )
 
     # Delays (s) — on hardware Nav2/SLAM take longer to come up than in sim
-    NAV2_STARTUP_DELAY = 10.0
+    NAV2_STARTUP_DELAY = 5.0
 
     # ---------------------------------------------------------
     # Utility Weights Node
@@ -110,7 +110,7 @@ def generate_launch_description():
         name="target_localizer",
         output="screen",
         parameters=[{
-            "use_sim_time": use_sim_time,
+            "use_sim_time": "False",
             "image_topic": "/camera/image_raw",
             "info_topic": "/camera/camera_info",
             "marker_size": 0.10,
