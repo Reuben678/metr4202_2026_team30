@@ -10,14 +10,6 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
 
-    use_sim_time = LaunchConfiguration("use_sim_time")
-
-    declare_use_sim_time = DeclareLaunchArgument(
-        "use_sim_time",
-        default_value="false",
-        description="Use robot clock.",
-    )
-
     # ---------------------------------------------------------
     # Nav2 + SLAM Toolbox (TurtleBot3)
     # Equivalent to:
@@ -34,7 +26,7 @@ def generate_launch_description():
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(tb3_nav2_launch),
         launch_arguments={
-            "use_sim_time": use_sim_time,
+            "use_sim_time": "False",
             "slam": "True",
         }.items(),
     )
@@ -52,7 +44,7 @@ def generate_launch_description():
         name="util_weights",
         output="screen",
         parameters=[{
-            "use_sim_time": use_sim_time,
+            "use_sim_time": "False",
         }],
     )
 
@@ -69,7 +61,7 @@ def generate_launch_description():
                 name="frontier_search",
                 output="screen",
                 parameters=[{
-                    "use_sim_time": use_sim_time,
+                    "use_sim_time": "False",
                 }],
             )
         ],
@@ -85,7 +77,7 @@ def generate_launch_description():
         name="recovery_helper",
         output="screen",
         parameters=[{
-            "use_sim_time": use_sim_time,
+            "use_sim_time": "False",
         }],
     )
 
@@ -102,7 +94,7 @@ def generate_launch_description():
                 name="exploration_manager",
                 output="screen",
                 parameters=[{
-                    "use_sim_time": use_sim_time,
+                    "use_sim_time": "False",
                 }],
             )
         ],
@@ -130,7 +122,6 @@ def generate_launch_description():
     # ---------------------------------------------------------
 
     return LaunchDescription([
-        declare_use_sim_time,
         navigation,
         util_weights,
         frontier_search,
