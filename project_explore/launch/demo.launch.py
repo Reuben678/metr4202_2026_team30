@@ -6,6 +6,7 @@ from launch.actions import IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from rclpy.parameter import Parameter
 
 
 def generate_launch_description():
@@ -26,8 +27,7 @@ def generate_launch_description():
     navigation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(tb3_nav2_launch),
         launch_arguments={
-            "use_sim_time": False,
-            "slam": True,
+            "slam": "True",
         }.items(),
     )
 
@@ -43,9 +43,6 @@ def generate_launch_description():
         executable="util_weights",
         name="util_weights",
         output="screen",
-        parameters=[{
-            "use_sim_time": False,
-        }],
     )
 
     # ---------------------------------------------------------
@@ -60,9 +57,6 @@ def generate_launch_description():
                 executable="frontier_search",
                 name="frontier_search",
                 output="screen",
-                parameters=[{
-                    "use_sim_time": False,
-                }],
             )
         ],
     )
@@ -76,9 +70,6 @@ def generate_launch_description():
         executable="recovery_helper",
         name="recovery_helper",
         output="screen",
-        parameters=[{
-            "use_sim_time": False,
-        }],
     )
 
     # ---------------------------------------------------------
@@ -93,9 +84,6 @@ def generate_launch_description():
                 executable="exploration_manager",
                 name="exploration_manager",
                 output="screen",
-                parameters=[{
-                    "use_sim_time": False,
-                }],
             )
         ],
     )
@@ -110,7 +98,6 @@ def generate_launch_description():
         name="target_localizer",
         output="screen",
         parameters=[{
-            "use_sim_time": False,
             "image_topic": "/camera/image_raw",
             "info_topic": "/camera/camera_info",
             "marker_size": 0.10,
