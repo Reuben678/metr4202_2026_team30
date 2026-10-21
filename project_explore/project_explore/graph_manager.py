@@ -57,7 +57,7 @@ class GraphManager:
 
         # Create navigation tools
         self.path_navigator = BasicNavigator(node_name="frontier_path_navigator")
-        self.path_navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
+        self.path_navigator.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, False)])
 
         # RViz display of the graph nodes
         self.marker_pub = self.node.create_publisher(Marker, "graph_nodes", 10)

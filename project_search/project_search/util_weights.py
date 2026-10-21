@@ -4,7 +4,6 @@ Author: Mitchell Crawford (s4584081)
 METR4202, Sem2, 2026
 """
 
-
 from metr4202_interfaces.srv import UtilWeights
 
 import rclpy
