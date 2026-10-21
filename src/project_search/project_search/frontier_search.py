@@ -7,29 +7,30 @@ METR4202, Sem2, 2026
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.parameter import Parameter
+
+from typing import Optional
 
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.msg import BehaviorTreeLog
+from nav2_simple_commander.robot_navigator import BasicNavigator
 from geometry_msgs.msg import PoseStamped
+
 from metr4202_interfaces.msg import FrontierArray
 from metr4202_interfaces.srv import UtilWeights
 from metr4202_interfaces.srv import GetFrontiers
 
+import math
 import numpy as np
 from scipy import ndimage
 
 
 FREE, UNKNOWN, OCCUPIED = 0, -1, 100    # Defined macros for trinary cell values
 
-<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
-MIN_FRONTIER_SIZE = 3   # Min size of frontier allowable 
-MIN_FRONTIER_DIST = 3
-=======
 MIN_FRONTIER_SIZE = 3       # Min size of frontier allowable 
 MIN_FRONTIER_DIST = 0.15    # Minimum dist for valid frontiers
 MAX_FRONTIER_DIST = 3       # Max distance considered
->>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
 MAP_FRAME = "map"
 ROBOT_FRAME = "base_link"
@@ -78,14 +79,6 @@ class FrontierSearch(Node):
             10
         )
 
-        # Create publishers
-        # ___________________________________________________________
-        self.frontier_pub = self.create_publisher(
-            PoseStamped,
-            'frontiers',
-            10
-        )
-
         # Create Interfaces
         # ___________________________________________________________
 
@@ -105,7 +98,6 @@ class FrontierSearch(Node):
         # Send an initial weights request
         self.send_request()
 
-        # Initially had FrontierData here, but not defined. Changed to GetFrontiers
         #MST client is also looking for get_frontiers
         self.frontier_srv = self.create_service(
             GetFrontiers,
@@ -126,45 +118,61 @@ class FrontierSearch(Node):
             rclpy.shutdown()
 
     def frontier_resp_callback(self, request, response):
-        if self.latest_map is None:
-            response.success = False
+        # Default to a failed, empty response
+        response.success = False
+        response.empty = True
+ 
+        # Mission has been completed
+        if request.end_search:
+            self.get_logger().info("End of search requested")
+            self.service_complete = True
+            self.send_request()     # Notify UtilWeights Node of shutdown
+            response.success = True
             return response
+        
+        if self.latest_map is None:
+            self.get_logger().warn("No map received yet")
+            return response
+ 
+        robot_pose = self.get_robot_pose()
+        if robot_pose is None:
+            return response
+ 
         # Update our map information
         info = self.latest_map.info
-
-        #class methods need self, fixed the clusters naming error below 
+ 
         frontier_mask = self.process_grid()
         if frontier_mask is None:
-            response.success = False
             return response 
         
-        clusters = self.cluster_frontiers(frontier_mask)
+        clusters = self.cluster_frontiers(
+            frontier_mask,
+            info.resolution,
+            info.origin.position.x,
+            info.origin.position.y,
+            robot_pose
+        )
 
-        # Check if clusters were found
         if not clusters:
-            self.get_logger().info("No frontiers were found within the grid")
+            self.get_logger().info("No local frontiers were found within the grid")
             response.success = True
-            response.complete = True
-            self.service_complete = True        # Mark this node of destruction
-            self.send_request()     # Notify UtilWeights Node of shutdown
+            response.empty = True
             return response
-        
+
+
         # Output frontier cluster count as info
         self.get_logger().info(f"{len(clusters)} frontiers(s) found")
 
-        response.frontiers = self.package_frontiers(clusters, 
-                                info.resolution,
-                                info.origin.position
-                            )
+        response.frontiers = self.package_frontiers(clusters)
         response.success = True
-        response.complete = False
+        response.empty = False
         return response        
 
     def send_request(self) -> None:
         """Request the latest utility weights asynchronously."""
 
         if not self.weight_client.service_is_ready():
-            self.get_logger().warning("UtilWeights service is not ready.")
+            self.get_logger().warn("UtilWeights service is not ready.")
             return
 
         if (hasattr(self, "weight_future") and self.weight_future is not None and not self.weight_future.done()):
@@ -197,7 +205,6 @@ class FrontierSearch(Node):
         self.w_cost = response.w_cost
         self.w_info = response.w_info
 
-        self.get_logger().info(f"Updated utility weights: " f"w_info={self.w_info:.3f}, "f"w_cost={self.w_cost:.3f}")
         self.weight_future = None
 
     # Callback to read from BehaviorTreeLog topic
@@ -244,28 +251,16 @@ class FrontierSearch(Node):
     """
     Cluster cells of frontiers
     """
-    @staticmethod
-    def cluster_frontiers(frontier_mask):
+    def cluster_frontiers(self, frontier_mask, resolution, origin_x, origin_y, robot_pose):
+
         structure = np.ones((3,3), dtype=int) # 8-connectivity
         clusters = []
         labeled, num = ndimage.label(frontier_mask, structure=structure)
-
+ 
+        rx, ry = robot_pose
+        
         for label_id in range(1, num + 1):
             ys, xs = np.where(labeled == label_id)
-<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
-
-            size = len(xs)
-            centroid_px = (float(np.mean(xs)), float(np.mean(ys)))
-
-            centroid_dist = np.hypot(centroid_px[0], centroid_px[1])
-
-            if (size < MIN_FRONTIER_SIZE or centroid_dist < MIN_FRONTIER_DIST):
-                continue
-
-            clusters.append({"label": label_id, "size": size, "centroid_px": centroid_px})
-
-        return clusters
-=======
  
             size = len(xs)
  
@@ -325,29 +320,14 @@ class FrontierSearch(Node):
                     b.pose.position.y - a.pose.position.y
                 )
             return distance
->>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
     """
     Convert grid cell indexs to world coords
     """
-    def grid_to_world(gx, gy, resolution, origin_x, origin_y):
+    def grid_to_world(self, gx, gy, resolution, origin_x, origin_y):
         world_x = origin_x + (gx + 0.5) * resolution
         world_y = origin_y + (gy + 0.5) * resolution
         return world_x, world_y
-
-    """
-    Score + rank by combined utility
-    """
-    def score_frontiers(clusters, resolution, origin_x, origin_y, robot_pose):
-        rx, ry = robot_pose
-        for c in clusters:
-            px, py = c["centroid_px"]
-            wx, wy = grid_to_world(px, py, resolution, origin_x, origin_y)
-            c["centroid"] = (wx, wy)
-            c["distance"] = float(np.hypot(wx - rx, wy - ry))
-            c["utility"] = self.w_info * c["size"] - self.w_cost * c["distance"]
-        
-        return sorted(clusters, key=lambda c: c["utility"], reverse=True)
 
     """
     Get the current odometry data, provided by the callback function
@@ -363,22 +343,14 @@ class FrontierSearch(Node):
     """
     Pacakge frontiers for publishing
     """
-    def package_frontiers(self, clusters, resolution, origin):
+    def package_frontiers(self, clusters):
         rows = [
             (c["label"], c["size"],
-<<<<<<< Updated upstream:src/project_search/project_search/frontier_search.py
-            origin.x + (c["centroid_px"][0] + 0.5) * resolution,
-            origin.y + (c["centroid_px"][1] + 0.5) * resolution)
-            for c in clusters
-        ]
-        arr = np.array(rows, dtype=np.float32).reshape(-1, 4)
-=======
             c["centroid"][0], c["centroid"][1],
             c["dist"], c["utility"])
             for c in clusters
         ]
         arr = np.array(rows, dtype=np.float32).reshape(-1, 6)
->>>>>>> Stashed changes:project_search/project_search/frontier_search.py
 
         msg = FrontierArray()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -386,17 +358,6 @@ class FrontierSearch(Node):
         msg.rows, msg.cols = arr.shape
         msg.data = arr.ravel().tolist()
         return msg
-
-    """
-    Publish the packaged frontiers data
-    """
-    def publish_package(self, package):
-        msg = FrontierArray()
-        msg.header.stamp = self.get_clock().now.to_msg()
-        msg.header.frame_id = "map"
-        msg.rows, msg.cols = package.shape
-        msg.data = package.ravel().tolist()
-        self.frontier_pub.publish(msg)
 
     """
     Process all grid data and publish
@@ -407,26 +368,19 @@ class FrontierSearch(Node):
             self.get_logger().debug("No new map recieved")
             return
         
-        # 2) Update robot pose information
-        robot_pose = self.get_robot_pose()
-        if robot_pose is None:
-            return
-        
-        # 3) Break down occupancy grid message
+        # 2) Break down occupancy grid message
         # Get msg from latest_map variable
         msg = self.latest_map
         # Process info from message
         width = msg.info.width
         height = msg.info.height
-        resolution = msg.info.resolution
-        origin_x = msg.info.origin.position.x
-        origin_y = msg.info.origin.position.y
 
-        # Process message data from 1D array to 2D array (grid)
-        grid = np.array(msg.data, dtype=np.int8).reshape((height, width))
+        # 3) Process message data from 1D array to 2D array (grid)
+        grid = np.array(msg.data, dtype=np.int8).reshape((height, width)) 
 
         # 4) Determine mask grid for frontiers
         frontier_mask = self.find_frontier_mask(grid)
+        
         return frontier_mask
 
 def main():
