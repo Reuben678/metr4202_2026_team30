@@ -36,69 +36,103 @@ class ExplorationState(Enum):
 class ExplorationManager(Node):
     """Manage frontier planning and navigation."""
 
+
     def __init__(self) -> None:
+        """Initialise the Exploration Manager and its ROS2 interfaces."""
+
         super().__init__("exploration_manager")
 
+        # ---------------------------------------------------------
+        # Exploration state and mission status
+        # ---------------------------------------------------------
         self.state = ExplorationState.INITIALISING
+        self.dependencies_initialised = False
+        self.navigation_started = False
+        self.mission_complete = False
 
-        # Map recovery tracking
-        self.map_recovery_attempts = 0
-        self.map_recovery_phase = "request"
+        # ---------------------------------------------------------
+        # Graph management and navigation
+        # ---------------------------------------------------------
+        # Initialise the graph manager and Nav2 navigation handler.
+        self.graph_manager = GraphManager(self)
+        self.nav2_handler = Nav2Handler()
 
-        # Map status before and after recovery
-        self.map_change_baseline = 0
-        self.map_message_baseline = 0
-        self.map_wait_deadline = None
-
-        # Completion verification
-        self.confirm_after_refresh = False
-        self.map_verification_paused = False
-        self.map_pause_change_count = 0
-
-        # Used to find the robot's current position on the generated map.
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-
-        # Retains selected traversal route
+        # Store the selected graph traversal route and active goal.
         self.traversal_route: List[Frontier] = []
+        self.current_goal: Optional[Frontier] = None
+        self.last_navigation_result: Optional[NavigationResult] = None
 
         # Track the last successfully reached graph node.
         self.last_reached_node_id = None
 
-        # The planner uses this node to request frontiers from Frontier Search.
-        self.graph_manager = GraphManager(self)
-        self.nav2_handler = Nav2Handler()
+        # ---------------------------------------------------------
+        # Robot localisation
+        # ---------------------------------------------------------
+        # Use TF2 to determine the robot's position in the map frame.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Client for requesting recovery manoeuvres.
-        self.recovery_client = self.create_client(RecoveryTrigger, "/recovery_node_service")
-
-        # Stores the active recovery request.
-        self.recovery_future = None
-
-        # Identifies which recovery behaviour is required.
-        self.recovery_type = None
-
-        self.current_goal: Optional[Frontier] = None
-        self.last_navigation_result: Optional[NavigationResult] = None
-
-        self.navigation_started = False
-        self.mission_complete = False
-        self.dependencies_initialised = False
-
-        # Number of consecutive frontier updates with no valid goals
+        # ---------------------------------------------------------
+        # Frontier and completion monitoring
+        # ---------------------------------------------------------
+        # Count consecutive frontier updates with no valid goals.
         self.empty_frontier_count = 0
 
+        # Track completion verification following a map refresh.
+        self.confirm_after_refresh = False
+        self.map_verification_paused = False
+        self.map_pause_change_count = 0
+
+        # ---------------------------------------------------------
         # Occupancy map monitoring
+        # ---------------------------------------------------------
+        # Store the latest map and track received and changed maps.
         self.latest_map = None
         self.last_map_received_time = None
         self.map_message_count = 0
         self.last_map_change_time = None
         self.map_change_count = 0
 
-        self.map_subscription = self.create_subscription(OccupancyGrid, "/map", self.map_callback, 10)
+        self.map_subscription = self.create_subscription(
+            OccupancyGrid,
+            "/map",
+            self.map_callback,
+            10,
+        )
 
+        # ---------------------------------------------------------
+        # Map recovery and verification
+        # ---------------------------------------------------------
+        # Track recovery attempts and the current recovery phase.
+        self.map_recovery_attempts = 0
+        self.map_recovery_phase = "request"
+
+        # Record map status before recovery to detect subsequent updates.
+        self.map_change_baseline = 0
+        self.map_message_baseline = 0
+        self.map_wait_deadline = None
+
+        # ---------------------------------------------------------
+        # Recovery service
+        # ---------------------------------------------------------
+        # Client for requesting robot recovery manoeuvres.
+        self.recovery_client = self.create_client(
+            RecoveryTrigger,
+            "/recovery_node_service",
+        )
+
+        # Track the active recovery request and requested behaviour.
+        self.recovery_future = None
+        self.recovery_type = None
+
+        # ---------------------------------------------------------
+        # Exploration execution
+        # ---------------------------------------------------------
+        # Execute the exploration state machine at 10 Hz.
         self.timer = self.create_timer(0.10, self.step)
+
         self.get_logger().info("Exploration Manager initialised.")
+
 
     def map_callback(self, msg: OccupancyGrid) -> None:
         """Monitor occupancy map messages and detect changes."""
@@ -144,7 +178,9 @@ class ExplorationManager(Node):
         try:
             transform = self.tf_buffer.lookup_transform("map", "base_link", Time())
         except TransformException as error:
-            self.get_logger().warning(f"Waiting for map -> base_link TF: {error}")
+            self.get_logger().warning(
+                f"Waiting for map -> base_link TF: {error}"
+            )
             return None
 
         translation = transform.transform.translation
@@ -181,7 +217,7 @@ class ExplorationManager(Node):
 
         if not route:
 
-            #no valid frontier remains in the graph
+            # no valid frontier remains in the graph
             self.empty_frontier_count += 1
             self.get_logger().info(
                 f"No valid exploration goals found. "
@@ -274,7 +310,9 @@ class ExplorationManager(Node):
         robot_position = self.get_robot_position()
 
         if robot_position is None:
-            self.get_logger().warning("Cannot navigate: robot position unavailable.")
+            self.get_logger().warning(
+                "Cannot navigate: robot position unavailable."
+            )
             return
 
         self.get_logger().info(
@@ -291,7 +329,7 @@ class ExplorationManager(Node):
             f"Target node: {self.current_goal.frontier_id} | "
             f"Previously visited: {self.current_goal.visited}"
         )
-        
+
         goal_sent = self.nav2_handler.navigate_to(
             self.current_goal.x,
             self.current_goal.y,
@@ -317,7 +355,9 @@ class ExplorationManager(Node):
             self.state = ExplorationState.UPDATING_RECORDS
 
         else:
-            self.get_logger().warning("Navigation failed. Entering recovery state.")
+            self.get_logger().warning(
+                "Navigation failed. Entering recovery state."
+            )
             self.recovery_type = "navigation"
             self.state = ExplorationState.RECOVERING
 
@@ -363,7 +403,9 @@ class ExplorationManager(Node):
 
         # 1. Waiting for a map following recovery
         if (
-            self.recovery_type == "map" and self.map_recovery_phase == "wait_map"):
+            self.recovery_type == "map"
+            and self.map_recovery_phase == "wait_map"
+        ):
             self.wait_for_map_refresh()
             return
 
@@ -464,7 +506,7 @@ class ExplorationManager(Node):
         self.recovery_type = None
 
         self.state = ExplorationState.REQUESTING_PLAN
-            
+
     def update_records(self) -> None:
         """Update the graph and determine the next state."""
 
@@ -492,11 +534,19 @@ class ExplorationManager(Node):
                 )
 
             else:
-                # Remove failed, unexplored frontier nodes only.
+                # Record the failed frontier's map coordinates so it
+                # cannot be rediscovered and immediately selected again.
+                self.graph_manager.blacklist_frontier(
+                    self.current_goal.position
+                )
+
+                # Remove the failed frontier node from the graph.
                 removed = self.graph_manager.remove_node(node_id)
 
                 if not removed:
-                    self.get_logger().warning(f"Could not remove failed node {node_id}.")
+                    self.get_logger().warning(
+                        f"Could not remove failed node {node_id}."
+                    )
 
             self.get_logger().warning(f"Failed to reach graph node {node_id}.")
 
@@ -607,7 +657,7 @@ class ExplorationManager(Node):
 
         elif self.state == ExplorationState.RECOVERING:
             self.process_recovery()
-    
+
         elif self.state == ExplorationState.UPDATING_RECORDS:
             self.update_records()
 
@@ -618,7 +668,9 @@ class ExplorationManager(Node):
                 # If the map eventually changes, resume planning.
                 if self.map_change_count > self.map_pause_change_count:
 
-                    self.get_logger().info("New map information detected. Resuming exploration.")
+                    self.get_logger().info(
+                        "New map information detected. Resuming exploration."
+                    )
 
                     self.map_verification_paused = False
                     self.map_recovery_attempts = 0
