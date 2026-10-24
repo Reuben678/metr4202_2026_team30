@@ -20,7 +20,7 @@ from std_msgs.msg import ColorRGBA
 
 Position = Tuple[float, float]
 
-FRONTIER_COLS = 5           # Expected columns in frontier msg
+FRONTIER_COLS = 5          # Expected columns in frontier msg
 
 MERGE_TOLERANCE = 0.8       # Allowable tolerance between frontier nodes [m]
 VISITED_TOLERANCE = 0.5     # Suppress frontiers near visited waypoints [m]
@@ -101,13 +101,13 @@ class GraphManager:
         # Store detected ArUco landmarks, keyed by marker ID.
         self.aruco_nodes = {}
 
-        # Subscribe to ArUco markers
+        # Subscribe to target localisation state
         self.aruco_subscription = self.node.create_subscription(
             String,
-            "/targets/aruco",
+            "/targets/state",
             self.aruco_callback,
             10,
-                                                               )
+        )
 
     def initialise(self, robot_position: Position):
         """Add the robot starting position as the first visited graph node."""
@@ -612,57 +612,87 @@ class GraphManager:
         # Exclude the robot's current node.
         return [self.get_node(node_id) for node_id in best_path[1:]]
 
+
     def aruco_callback(self, msg: String) -> None:
-        """Create a landmark entry when a new ArUco ID is detected."""
+        """Receive confirmed target positions from target localisation."""
 
         try:
             data = json.loads(msg.data)
         except (json.JSONDecodeError, TypeError) as error:
             self.node.get_logger().warning(
-                f"Invalid marker JSON: {error}"
-                                          )
+                f"Invalid target JSON: {error}"
+            )
             return
 
         if not isinstance(data, dict):
             return
 
-        try:
-            marker_id = int(data["id"])
-            x = float(data["pos_x"])
-            y = float(data["pos_y"])
-
-            timestamp = data["time"]
-            time_sec = int(timestamp["sec"])
-            time_nanosec = int(timestamp["nanosec"])
-
-            if not all(math.isfinite(v) for v in (x, y)):
-                return
-
-        except (KeyError, TypeError, ValueError, OverflowError):
-            self.node.get_logger().warning(
-                "Marker JSON is missing valid id, pos_x, pos_y, or time fields."
-                                          )
+        # Only accept positions expressed in the map frame.
+        if data.get("frame") != "map":
             return
 
-        # Preserve the first recorded map location for each detected marker ID.
-        if marker_id in self.aruco_nodes:
+        targets = data.get("targets", [])
+        if not isinstance(targets, list):
             return
 
-        self.aruco_nodes[marker_id] = {
-            "id": marker_id,
-            "x": x,
-            "y": y,
-            "time": {
-                "sec": time_sec,
-                "nanosec": time_nanosec,
-            },
-                                      }
+        # Clear previously stored targets when the localisation
+        # run or map epoch changes.
+        run_id = data.get("run_id")
+        epoch = data.get("epoch")
 
-        self.node.get_logger().info(
-            f"New ArUco marker {marker_id} at "
-            f"x={x:.2f}, y={y:.2f}, "
-            f"time={time_sec}.{time_nanosec:09d}"
-                                   )
+        if not isinstance(run_id, str) or not isinstance(epoch, int):
+            return
+
+        current_version = (run_id, epoch)
+
+        if getattr(self, "_target_version", None) != current_version:
+            self.aruco_nodes.clear()
+            self._target_version = current_version
+
+        # Store confirmed targets from the current state.
+        updated_nodes = {}
+
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+
+            if not target.get("confirmed", False):
+                continue
+
+            xyz = target.get("xyz")
+
+            if not isinstance(xyz, (list, tuple)) or len(xyz) < 2:
+                continue
+
+            try:
+                marker_id = int(target["id"])
+                x = float(xyz[0])
+                y = float(xyz[1])
+
+                if not all(math.isfinite(v) for v in (x, y)):
+                    continue
+
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+
+            stamp = data.get("stamp", 0.0)
+
+            updated_nodes[marker_id] = {
+                "id": marker_id,
+                "x": x,
+                "y": y,
+                "time": stamp,
+            }
+
+            previous = self.aruco_nodes.get(marker_id)
+
+            if previous is None:
+                self.node.get_logger().info(
+                    f"New ArUco marker {marker_id}: "
+                    f"x={x:.2f}, y={y:.2f}"
+                )
+
+        self.aruco_nodes = updated_nodes
 
     def get_marker_node(self, marker_id: int):
         """Get a stored landmark by ID, or None if it is unknown."""
