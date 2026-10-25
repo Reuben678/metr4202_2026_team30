@@ -104,5 +104,3 @@ Progress can be observed through the terminal logs and RViz2.
 ## 6. Stop the demonstration
 
 To stop the project nodes, press **Ctrl + C** in the terminal running `demo.launch.py`.
-
-The existing Gazebo, SLAM, Nav2 and RViz2 processes can be stopped separately using the course setup.
