@@ -20,7 +20,7 @@ from std_msgs.msg import ColorRGBA
 
 Position = Tuple[float, float]
 
-FRONTIER_COLS = 5          # Expected columns in frontier msg
+FRONTIER_COLS = 6          # Expected columns in frontier msg
 
 MERGE_TOLERANCE = 0.8       # Allowable tolerance between frontier nodes [m]
 VISITED_TOLERANCE = 0.5     # Suppress frontiers near visited waypoints [m]
@@ -322,7 +322,7 @@ class GraphManager:
                     size=int(row[1]),
                     x=float(row[2]),
                     y=float(row[3]),
-                    utility=float(row[4]),
+                    utility=float(row[5]),
                         )
                             )
         return frontiers
