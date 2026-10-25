@@ -220,7 +220,7 @@ def generate_launch_description():
     # ---------------------------------------------------------
 
     target_localizer = TimerAction(
-        period=16.0,
+        period=8.0,
         actions=[
             Node(
                 package="project_localisation",
