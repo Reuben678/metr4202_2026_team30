@@ -583,6 +583,27 @@ class ExplorationManager(Node):
         """Report that exploration has finished."""
 
         self.get_logger().info("Exploration complete.")
+        markers = self.graph_manager.found_aruco_nodes
+
+        if not markers:
+            self.get_logger().info(
+                "ArUco findings: No confirmed markers detected."
+            )
+            return
+
+        lines = [
+            f"ARUCO FINDINGS SUMMARY ({len(markers)} markers)",
+            "Coordinates in map frame:"
+        ]
+
+        for marker_id, marker in sorted(markers.items()):
+            lines.append(
+                f"  ArUco ID {marker_id}: "
+                f"X = {marker['x']:.2f} m, "
+                f"Y = {marker['y']:.2f} m"
+            )
+
+        self.get_logger().info("\n".join(lines))
 
     def step(self) -> None:
         """Run the current stage of the exploration process."""

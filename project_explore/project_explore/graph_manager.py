@@ -324,7 +324,7 @@ class GraphManager:
                     y=float(row[3]),
                     utility=float(row[5]),
                         )
-                            )
+            )
         return frontiers
 
     def find_proxy_node(self, position: Position, visited: bool) -> Optional[int]:
