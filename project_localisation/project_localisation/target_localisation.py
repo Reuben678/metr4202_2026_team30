@@ -1,3 +1,7 @@
+"""
+ROS 2 node for ArUco-based target localisation and visualisation
+"""
+
 import csv
 import json
 import math
@@ -29,15 +33,18 @@ LATCH = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 def parameter(node, name, default):
+    """Declare a ROS parameter and return its configured value."""
     return node.declare_parameter(name, default).value
 
 
 def parts(tf):
+    """Extract translation and quaternion components from a transform."""
     t, q = tf.transform.translation, tf.transform.rotation
     return [t.x, t.y, t.z], [q.x, q.y, q.z, q.w]
 
 
 def save(path, data):
+    """Write JSON data atomically by replacing a temporary file."""
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, indent=2, allow_nan=False),
                          encoding='utf-8')
@@ -45,7 +52,9 @@ def save(path, data):
 
 
 class Localizer(Node):
+    """Detect ArUco markers, fuse observations, and publish target estimates."""
     def __init__(self):
+        """Initialize parameters, detection, TF, logging, and ROS interfaces."""
         super().__init__('target_localizer')
         self.size = parameter(self, 'marker_size', 0.10)
         square_points(self.size)
@@ -139,12 +148,15 @@ class Localizer(Node):
         )
 
     def now_s(self):
+        """Return the current ROS clock time in seconds."""
         return self.get_clock().now().nanoseconds * 1e-9
 
     def warn(self, message):
+        """Log a warning with throttling to avoid repetitive messages."""
         self.get_logger().warning(message, throttle_duration_sec=5.0)
 
     def on_id(self, msg):
+        """Record a valid marker ID announced by the optional ID detector."""
         mid = int(msg.data)
         if 0 <= mid < len(self.dictionary.bytesList):
             self.announced_ids.add(mid)
@@ -152,6 +164,7 @@ class Localizer(Node):
             self.warn('Received an ID outside the configured dictionary')
 
     def on_info(self, msg):
+        """Store camera calibration and reset tracks if calibration changes."""
         signature = (msg.header.frame_id, msg.width, msg.height,
                      tuple(msg.k), tuple(msg.d), msg.distortion_model,
                      msg.binning_x, msg.binning_y, msg.roi.x_offset, msg.roi.y_offset)
@@ -160,6 +173,7 @@ class Localizer(Node):
         self.info, self.info_signature = msg, signature
 
     def check_clock(self):
+        """Detect backwards ROS clock jumps and return the current time."""
         now = self.now_s()
         if now < self.last_clock - 0.05:
             self.reset('ROS clock moved backwards')
@@ -171,6 +185,7 @@ class Localizer(Node):
     def on_image(self, msg):
         # Use the local ROS clock at image arrival for freshness and timing.
         # Keep the original image stamp for timestamped TF lookups.
+        """Validate and process an image, queueing usable marker observations."""
         now = self.check_clock()
         stamp_ns = (
             msg.header.stamp.sec * 10**9
@@ -271,6 +286,7 @@ class Localizer(Node):
             self.warn(str(error))
 
     def reset(self, reason='Manual reset'):
+        """Clear accumulated position evidence and advance the tracking epoch."""
         self.tracks.clear()
         self.records.clear()
         self.queue.clear()
@@ -283,12 +299,14 @@ class Localizer(Node):
         self.get_logger().info(reason + '; position evidence cleared')
 
     def reset_service(self, request, response):
+        """Handle the service request to clear target position evidence."""
         self.reset()
         self.publish()
         response.success, response.message = True, 'Positions cleared; IDs retained'
         return response
 
     def process(self):
+        """Transform queued observations into the map frame and update tracks."""
         now = self.check_clock()
         try:
             trans, q = parts(self.tf.lookup_transform('map', 'odom', Time()))
@@ -354,6 +372,7 @@ class Localizer(Node):
                 self.queue.append(dict(data, items=pending))
 
     def publish_marker_visualization(self):
+        """Publish confirmed target markers and remove obsolete RViz markers."""
         msg = MarkerArray()
         now = self.get_clock().now().to_msg()
 
@@ -430,6 +449,7 @@ class Localizer(Node):
 
     def publish(self, ros_output=True):
         # Update target position estimates from new observations.
+        """Fuse observations and publish target state, JSON, and RViz markers."""
         for mid in sorted(self.dirty):
             samples = list(self.tracks[mid])
             result = fuse(
@@ -569,6 +589,7 @@ class Localizer(Node):
         self.log_file.flush()
 
     def destroy_node(self):
+        """Flush final state and close the observation log before shutdown."""
         if hasattr(self, 'log_file') and not self.log_file.closed:
             try:
                 self.publish(ros_output=rclpy.ok())
@@ -576,7 +597,9 @@ class Localizer(Node):
                 self.log_file.close()
         return super().destroy_node()
 
+
 def localizer_main(args=None):
+    """Initialize ROS, run the localizer node, and shut ROS down cleanly."""
     rclpy.init(args=args)
     node = None
     try:
@@ -589,6 +612,7 @@ def localizer_main(args=None):
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
 
 if __name__ == '__main__':
     localizer_main()

@@ -1,4 +1,7 @@
-
+"""
+Code for testing ArUco marker detection using raw camera input
+through simulation and through live camera feed
+"""
 import cv2
 import rclpy
 
