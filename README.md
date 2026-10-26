@@ -65,7 +65,7 @@ ros2 launch project_explore demo.launch.py
 
 This launches the team's project nodes and connects them to the existing ROS 2 simulation and navigation environment.
 
-**Important:** `demo.launch.py` does not launch Gazebo, SLAM, Nav2 or RViz2. These systems must already be running.
+**Important:** `demo.launch.py` does not launch Gazebo, SLAM, or RViz2. These systems must already be running.
 
 ## 4. Optional — Launch our custom RViz configuration
 
