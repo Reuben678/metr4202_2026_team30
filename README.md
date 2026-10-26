@@ -83,8 +83,6 @@ rviz2 -d "$(ros2 pkg prefix project_explore)/share/project_explore/config/metr42
 
 This loads the RViz configuration installed with the `project_explore` ROS 2 package.
 
-**Note:** This step is optional. The demonstration can run using the tutors' existing RViz setup.
-
 ## 5. Expected operation
 
 Once the project nodes have initialised, the robot should begin autonomously exploring the environment.
