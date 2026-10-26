@@ -60,6 +60,8 @@ Open a new terminal and run:
 source /opt/ros/humble/setup.bash
 source ~/metr4202_demo_ws/install/setup.bash
 
+export TURTLEBOT3_MODEL=waffle_pi
+
 ros2 launch project_explore demo.launch.py
 ```
 
