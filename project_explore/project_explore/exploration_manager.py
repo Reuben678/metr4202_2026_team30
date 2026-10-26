@@ -583,7 +583,7 @@ class ExplorationManager(Node):
         """Report that exploration has finished."""
 
         self.get_logger().info("Exploration complete.")
-        markers = self.graph_manager.found_aruco_nodes
+        markers = self.graph_manager.aruco_nodes
 
         if not markers:
             self.get_logger().info(

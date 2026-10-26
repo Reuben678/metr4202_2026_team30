@@ -35,7 +35,7 @@ VISITED_COLOUR = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)      # Visited node marke
 UNVISITED_COLOUR = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)    # Unvisited node marker RGB
 
 # Blacklisted frontier tolerance [m]
-BLACKLIST_TOLERANCE = 0.8
+BLACKLIST_TOLERANCE = 0.3
 
 @dataclass
 class Frontier:
@@ -360,7 +360,7 @@ class GraphManager:
         self.node.get_logger().warning(
             f"Blacklisted unreachable frontier at "
             f"({position[0]:.2f}, {position[1]:.2f})"
-                                      )
+        )
 
 
     def is_blacklisted(self, position: Position) -> bool:
@@ -369,7 +369,7 @@ class GraphManager:
             distance = hypot(
                 position[0] - failed_position[0],
                 position[1] - failed_position[1],
-                            )
+            )
 
             if distance <= BLACKLIST_TOLERANCE:
                 return True
